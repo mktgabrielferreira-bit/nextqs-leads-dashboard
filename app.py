@@ -184,8 +184,8 @@ def load_all_data():
 # -----------------------------
 # botão para limpar cache e recarregar do Sheets
 if st.sidebar.button("🔄 Atualizar Informações"):
-    load_all_data.clear()        # limpa o cache dessa função
-    st.experimental_rerun()      # recarrega o app
+    load_all_data.clear()   # limpa o cache
+    st.rerun()              # recarrega o app
 
 df = load_all_data()
 
