@@ -182,6 +182,11 @@ def load_all_data():
 # -----------------------------
 # DASHBOARD
 # -----------------------------
+# botão para limpar cache e recarregar do Sheets
+if st.sidebar.button("🔄 Atualizar Informações"):
+    load_all_data.clear()        # limpa o cache dessa função
+    st.experimental_rerun()      # recarrega o app
+
 df = load_all_data()
 
 st.title("📊 Relatório de Leads no Site NextQS")
