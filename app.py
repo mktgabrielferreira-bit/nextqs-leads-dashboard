@@ -90,7 +90,7 @@ def load_all_data():
         st.secrets["gcp_service_account"],
         scopes=SCOPES,
     )
-else:
+    else:
     # opcional: só funciona se você tiver o JSON local
     creds = Credentials.from_service_account_file(
         "credenciais_sheets.json",
