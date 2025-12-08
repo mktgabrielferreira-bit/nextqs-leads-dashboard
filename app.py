@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import gspread
 from google.oauth2.service_account import Credentials
+import json
 
 # -----------------------------
 # PROTEÇÃO POR SENHA
@@ -87,8 +88,9 @@ def load_all_data():
 
     # usa secrets no Streamlit Cloud; usa arquivo local se estiver rodando na máquina
     if "gcp_service_account" in st.secrets:
+        service_info = json.loads(st.secrets["gcp_service_account"])
         creds = Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"],
+            service_info,
             scopes=SCOPES,
         )
     else:
@@ -100,7 +102,7 @@ def load_all_data():
 
     client = gspread.authorize(creds)
     sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-    
+
     data = sheet.get_all_records()
     df = pd.DataFrame(data)
 
