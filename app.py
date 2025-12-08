@@ -18,6 +18,7 @@ def login():
         else:
             st.error("Senha incorreta")
 
+
 if "autenticado" not in st.session_state:
     st.session_state["autenticado"] = False
 
@@ -62,7 +63,7 @@ DIA_SEMANA_LABEL = {
 
 # -----------------------------
 # FUNÇÃO PARA NORMALIZAR false/undefined/etc
-# (AGORA SEM ALTERAR MAIÚSCULA/MINÚSCULA ORIGINAL)
+# (SEM ALTERAR MAIÚSCULA/MINÚSCULA ORIGINAL)
 # -----------------------------
 def normalize_empty(value):
     if pd.isna(value):
@@ -71,7 +72,7 @@ def normalize_empty(value):
     low = text.lower()
     if low in ["false", "none", "null", "undefined", "", "nan"]:
         return None
-    return text  # devolve o texto ORIGINAL, sem forçar lower/title
+    return text  # devolve o texto ORIGINAL
 
 
 # -----------------------------
@@ -87,21 +88,21 @@ def load_all_data():
 
     # usa secrets no Streamlit Cloud; usa arquivo local se estiver rodando na máquina
     if "gcp_service_account" in st.secrets:
-    service_info = dict(st.secrets["gcp_service_account"])
-    creds = Credentials.from_service_account_info(
-        service_info,
-        scopes=SCOPES,
-    )
+        # st.secrets["gcp_service_account"] vem do [gcp_service_account] no secrets.toml
+        service_info = dict(st.secrets["gcp_service_account"])
+        creds = Credentials.from_service_account_info(
+            service_info,
+            scopes=SCOPES,
+        )
     else:
-    # opcional: só funciona se você tiver o JSON local
-    creds = Credentials.from_service_account_file(
-        "credenciais_sheets.json",
-        scopes=SCOPES,
-    )
+        # opcional: só funciona se você tiver o JSON local na máquina
+        creds = Credentials.from_service_account_file(
+            "credenciais_sheets.json",
+            scopes=SCOPES,
+        )
 
     client = gspread.authorize(creds)
     sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-
 
     data = sheet.get_all_records()
     df = pd.DataFrame(data)
@@ -136,9 +137,6 @@ def load_all_data():
     df["dispositivo"] = df["dispositivo"].apply(
         lambda x: x if x == "Dispositivo não identificado" else str(x).capitalize()
     )
-
-    # origem e utm_campaign ficam EXATAMENTE como vêm da planilha
-    # (já tratamos apenas os lixos acima)
 
     # converte data_hora (formato: 04/12/2025 - 14:45:58)
     df["data_hora"] = pd.to_datetime(
@@ -284,7 +282,6 @@ with col3:
 
 with col4:
     st.metric("Desktop (%)", f"{pct_top:.1f}%", delta=f"{dispositivo_top} mais comum")
-
 
 st.markdown("---")
 
