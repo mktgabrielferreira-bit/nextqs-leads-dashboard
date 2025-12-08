@@ -85,21 +85,22 @@ def load_all_data():
 
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
+    # usa secrets no Streamlit Cloud; usa arquivo local se estiver rodando na máquina
     if "gcp_service_account" in st.secrets:
-    creds = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"],
-        scopes=SCOPES,
-    )
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=SCOPES,
+        )
     else:
-    # opcional: só funciona se você tiver o JSON local
-    creds = Credentials.from_service_account_file(
-        "credenciais_sheets.json",
-        scopes=SCOPES,
-    )
+        # opcional: só funciona se você tiver o JSON local
+        creds = Credentials.from_service_account_file(
+            "credenciais_sheets.json",
+            scopes=SCOPES,
+        )
 
     client = gspread.authorize(creds)
     sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-
+    
     data = sheet.get_all_records()
     df = pd.DataFrame(data)
 
