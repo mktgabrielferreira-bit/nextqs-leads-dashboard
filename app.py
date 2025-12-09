@@ -255,6 +255,49 @@ df_filtrado = df_periodo[
 df_filtrado = df_filtrado.sort_values("data_hora")
 
 # -----------------------------
+# RANKING DE MESES (APENAS QUANDO "TODO O ANO" ESTIVER SELECIONADO)
+# -----------------------------
+if mes_label_sel == "Todo o ano":
+    st.subheader("Ranking de Meses por Leads Únicos no Ano")
+
+    # agrupa por mês considerando todos os filtros adicionais já aplicados
+    ranking_meses = (
+        df_filtrado
+        .groupby("mes")["user_id_email"]
+        .nunique()
+        .reset_index(name="leads_unicos")
+    )
+
+    if ranking_meses.empty:
+        st.info("Nenhuma informação de leads únicos para montar o ranking de meses.")
+    else:
+        # adiciona nome do mês
+        ranking_meses["mes_nome"] = ranking_meses["mes"].map(MESES_LABEL)
+        # ordena do mês com mais leads únicos para o que tem menos
+        ranking_meses = ranking_meses.sort_values("leads_unicos", ascending=False)
+
+        # gráfico de barras
+        fig_meses = px.bar(
+            ranking_meses,
+            x="mes_nome",
+            y="leads_unicos",
+            title="Meses com mais conversões (Leads únicos)"
+        )
+        fig_meses.update_layout(
+            xaxis_title="Mês",
+            yaxis_title="Leads únicos"
+        )
+        st.plotly_chart(fig_meses, use_container_width=True)
+
+        # tabela de apoio (ranking)
+        st.dataframe(
+            ranking_meses[["mes_nome", "leads_unicos"]]
+            .rename(columns={"mes_nome": "Mês", "leads_unicos": "Leads únicos"}),
+            use_container_width=True,
+        )
+
+
+# -----------------------------
 # KPIs
 # -----------------------------
 conv_total = len(df_filtrado)
