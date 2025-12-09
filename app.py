@@ -195,6 +195,7 @@ if df.empty:
     st.warning("Nenhum dado encontrado na planilha do Google Sheets.")
     st.stop()
 
+# Período disponível (sempre antes dos KPIs)
 st.caption(
     f"Período disponível: {df['data'].min()} até {df['data'].max()} "
     f"({df['ano'].min()} - {df['ano'].max()})"
@@ -222,6 +223,7 @@ if df_periodo.empty:
     st.warning("Nenhum Lead encontrado para o período selecionado.")
     st.stop()
 
+# Período filtrado (também antes dos KPIs)
 st.caption(
     f"Período filtrado: {df_periodo['data'].min()} até {df_periodo['data'].max()}"
 )
@@ -255,49 +257,6 @@ df_filtrado = df_periodo[
 df_filtrado = df_filtrado.sort_values("data_hora")
 
 # -----------------------------
-# RANKING DE MESES (APENAS QUANDO "TODO O ANO" ESTIVER SELECIONADO)
-# -----------------------------
-if mes_label_sel == "Todo o ano":
-    st.subheader("Ranking de Meses por Leads Únicos no Ano")
-
-    # agrupa por mês considerando todos os filtros adicionais já aplicados
-    ranking_meses = (
-        df_filtrado
-        .groupby("mes")["user_id_email"]
-        .nunique()
-        .reset_index(name="leads_unicos")
-    )
-
-    if ranking_meses.empty:
-        st.info("Nenhuma informação de leads únicos para montar o ranking de meses.")
-    else:
-        # adiciona nome do mês
-        ranking_meses["mes_nome"] = ranking_meses["mes"].map(MESES_LABEL)
-        # ordena do mês com mais leads únicos para o que tem menos
-        ranking_meses = ranking_meses.sort_values("leads_unicos", ascending=False)
-
-        # gráfico de barras
-        fig_meses = px.bar(
-            ranking_meses,
-            x="mes_nome",
-            y="leads_unicos",
-            title="Meses com mais conversões (Leads únicos)"
-        )
-        fig_meses.update_layout(
-            xaxis_title="Mês",
-            yaxis_title="Leads únicos"
-        )
-        st.plotly_chart(fig_meses, use_container_width=True)
-
-        # tabela de apoio (ranking)
-        st.dataframe(
-            ranking_meses[["mes_nome", "leads_unicos"]]
-            .rename(columns={"mes_nome": "Mês", "leads_unicos": "Leads únicos"}),
-            use_container_width=True,
-        )
-
-
-# -----------------------------
 # KPIs
 # -----------------------------
 conv_total = len(df_filtrado)
@@ -319,17 +278,36 @@ else:
 # KPIs em colunas com a coluna 3 mais larga
 col1, col2, col3, col4 = st.columns([1, 1, 2, 1])
 
+# Cor verde para indicar resultado positivo
+GREEN_COLOR = "#22c55e"
+
 with col1:
-    st.metric("Leads no período", conv_total)
+    st.text("Leads no período")
+    st.markdown(
+        f"<span style='font-size:32px; font-weight:bold; color:{GREEN_COLOR}'>{conv_total}</span>",
+        unsafe_allow_html=True,
+    )
 
 with col2:
-    st.metric("Leads únicos", usuarios_unicos)
+    st.text("Leads únicos")
+    st.markdown(
+        f"<span style='font-size:32px; font-weight:bold; color:{GREEN_COLOR}'>{usuarios_unicos}</span>",
+        unsafe_allow_html=True,
+    )
 
 with col3:
-    st.metric("Origem mais comum", origem_top)
+    st.text("Origem mais comum")
+    st.markdown(
+        f"<span style='font-size:32px; font-weight:bold; color:{GREEN_COLOR}'>{origem_top}</span>",
+        unsafe_allow_html=True,
+    )
 
 with col4:
-    st.metric("Desktop (%)", f"{pct_top:.1f}%", delta=f"{dispositivo_top} mais comum")
+    st.text("Desktop (%)")
+    st.markdown(
+        f"<span style='font-size:32px; font-weight:bold; color:{GREEN_COLOR}'>{pct_top:.1f}%</span>",
+        unsafe_allow_html=True,
+    )
 
 st.markdown("---")
 
@@ -342,6 +320,36 @@ conv_por_dia = df_filtrado.groupby("data").size().reset_index(name="leads")
 fig_dia = px.line(conv_por_dia, x="data", y="leads")
 fig_dia.update_layout(xaxis_title="Data", yaxis_title="Leads")
 st.plotly_chart(fig_dia, use_container_width=True)
+
+# -----------------------------
+# RANKING DE MESES (APENAS QUANDO "TODO O ANO" ESTIVER SELECIONADO)
+# -----------------------------
+if mes_label_sel == "Todo o ano":
+    st.subheader("Ordem dos Meses com mais Conversões (Leads únicos)")
+
+    ranking_meses = (
+        df_filtrado
+        .groupby("mes")["user_id_email"]
+        .nunique()
+        .reset_index(name="leads_unicos")
+    )
+
+    if ranking_meses.empty:
+        st.info("Nenhuma informação de leads únicos para montar o ranking de meses.")
+    else:
+        ranking_meses["mes_nome"] = ranking_meses["mes"].map(MESES_LABEL)
+        ranking_meses = ranking_meses.sort_values("leads_unicos", ascending=False)
+
+        fig_meses = px.bar(
+            ranking_meses,
+            x="mes_nome",
+            y="leads_unicos",
+        )
+        fig_meses.update_layout(
+            xaxis_title="Mês",
+            yaxis_title="Leads únicos",
+        )
+        st.plotly_chart(fig_meses, use_container_width=True)
 
 # -----------------------------
 # LINHA 2: ORIGEM x EVENTO
