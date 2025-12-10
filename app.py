@@ -400,13 +400,12 @@ with col_g2:
 # -----------------------------
 # RANKING: CAMPANHAS + PALAVRAS-CHAVE (LISTAS)
 # -----------------------------
-st.subheader("Ranking de Campanhas e Palavras-Chaves")
 
 col_rank1, col_rank2 = st.columns(2)
 
 # ---- Lista de utm_campaign ----
 with col_rank1:
-    st.markdown("### Campanhas e Conversões")
+    st.markdown("### Campanhas")
 
     df_campanhas = df_filtrado[df_filtrado["utm_campaign"] != "Campanha não identificada"]
 
@@ -424,7 +423,7 @@ with col_rank1:
 
 # ---- Lista de utm_term ----
 with col_rank2:
-    st.markdown("### Palavra-Chave e Conversões")
+    st.markdown("### Termos de Pesquisa")
 
     df_terms = df_filtrado[df_filtrado["utm_term"] != "Palavra-chave não identificada"]
 
