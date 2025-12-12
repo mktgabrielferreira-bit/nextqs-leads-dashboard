@@ -198,13 +198,11 @@ def load_all_data():
 
 
 # -----------------------------
-# SIDEBAR: ATUALIZAR + FILTROS DE PERÍODO (NOVO)
+# SIDEBAR: ATUALIZAR + FILTROS DE PERÍODO
 # -----------------------------
-# Botão "Atualizar Informações" (como já está)
 if st.sidebar.button("🔄 Atualizar Informações"):
     trigger_sheet_reload()
 
-# Carrega dados
 df = load_all_data()
 
 st.title("📊 Relatório de Leads no Site NextQS")
@@ -213,20 +211,32 @@ if df.empty:
     st.warning("Nenhum dado encontrado na planilha do Google Sheets.")
     st.stop()
 
-# Período disponível
 st.caption(
     f"Período disponível: {df['data'].min()} até {df['data'].max()} "
     f"({df['ano'].min()} - {df['ano'].max()})"
 )
 
-# Defaults / estado
-PERIODOS = ["Hoje", "Ontem", "Últimos 7 dias", "Este mês", "Este ano", "Personalizado"]
+# Datas de referência (usadas em filtros e no personalizado)
+hoje = get_today_local()
+ontem = hoje - timedelta(days=1)
+
+# Estados
+PERIODOS = ["Hoje", "Ontem", "Últimos 7 dias", "Este mês", "Este ano"]
+
 if "periodo_sel" not in st.session_state:
     st.session_state["periodo_sel"] = "Últimos 7 dias"  # padrão ao abrir
 if "periodo_sel_prev" not in st.session_state:
     st.session_state["periodo_sel_prev"] = st.session_state["periodo_sel"]
 
-# Rádio (bolinhas)
+# Personalizado: não é rádio, só aplica no botão
+if "use_custom" not in st.session_state:
+    st.session_state["use_custom"] = False
+if "custom_ano" not in st.session_state:
+    st.session_state["custom_ano"] = hoje.year
+if "custom_mes_label" not in st.session_state:
+    st.session_state["custom_mes_label"] = "Todo o ano"
+
+# Rádio (bolinhas) - somente períodos rápidos
 periodo_sel = st.sidebar.radio(
     label="",
     options=PERIODOS,
@@ -234,93 +244,77 @@ periodo_sel = st.sidebar.radio(
     key="periodo_sel",
 )
 
-# Quando mudar qualquer opção (inclusive entrar em Personalizado),
-# faz a releitura da planilha (mesmo do botão).
+# Mudou período rápido -> desliga custom e recarrega
 if periodo_sel != st.session_state.get("periodo_sel_prev"):
     st.session_state["periodo_sel_prev"] = periodo_sel
+    st.session_state["use_custom"] = False
     trigger_sheet_reload()
+
+# Personalizado (seta para baixo). NÃO recarrega ao trocar ano/mês.
+with st.sidebar.expander("Personalizado ▾", expanded=False):
+    anos_disponiveis = sorted(df["ano"].unique())
+    if anos_disponiveis and st.session_state["custom_ano"] not in anos_disponiveis:
+        st.session_state["custom_ano"] = anos_disponiveis[-1]
+
+    custom_ano = st.selectbox(
+        "Ano",
+        options=anos_disponiveis,
+        index=anos_disponiveis.index(st.session_state["custom_ano"]) if anos_disponiveis else 0,
+        key="custom_ano",
+    )
+
+    meses_disponiveis = sorted(df[df["ano"] == custom_ano]["mes"].unique())
+    opcoes_meses = ["Todo o ano"] + [MESES_LABEL[m] for m in meses_disponiveis]
+
+    custom_mes_label = st.selectbox(
+        "Mês",
+        options=opcoes_meses,
+        index=opcoes_meses.index(st.session_state["custom_mes_label"])
+        if st.session_state["custom_mes_label"] in opcoes_meses
+        else 0,
+        key="custom_mes_label",
+    )
+
+    if st.button("Aplicar"):
+        st.session_state["use_custom"] = True
+        trigger_sheet_reload()
+
+# Indicador visual simples
+if st.session_state.get("use_custom", False):
+    st.sidebar.caption("✅ Personalizado aplicado")
 
 # -----------------------------
 # APLICAR FILTRO DE PERÍODO
 # -----------------------------
-hoje = get_today_local()
-ontem = hoje - timedelta(days=1)
-
 df_periodo = df.copy()
 
-if periodo_sel == "Hoje":
-    df_periodo = df[df["data"] == hoje].copy()
-
-elif periodo_sel == "Ontem":
-    df_periodo = df[df["data"] == ontem].copy()
-
-elif periodo_sel == "Últimos 7 dias":
-    # EXEMPLO do usuário: 12/12 -> 05/12 a 11/12 (exclui hoje)
-    start = hoje - timedelta(days=7)
-    end = ontem
-    df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
-
-elif periodo_sel == "Este mês":
-    start = date(hoje.year, hoje.month, 1)
-    end = ontem
-    df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
-
-elif periodo_sel == "Este ano":
-    start = date(hoje.year, 1, 1)
-    end = ontem
-    df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
-
-elif periodo_sel == "Personalizado":
-    # "setinha": expander
-    with st.sidebar.expander("Personalizado", expanded=True):
-        anos_disponiveis = sorted(df["ano"].unique())
-        ano_default = anos_disponiveis[-1] if anos_disponiveis else hoje.year
-
-        if "custom_ano" not in st.session_state:
-            st.session_state["custom_ano"] = ano_default
-        if "custom_mes_label" not in st.session_state:
-            st.session_state["custom_mes_label"] = "Todo o ano"
-
-        custom_ano = st.selectbox(
-            "Ano",
-            options=anos_disponiveis,
-            index=anos_disponiveis.index(st.session_state["custom_ano"])
-            if st.session_state["custom_ano"] in anos_disponiveis
-            else len(anos_disponiveis) - 1,
-            key="custom_ano",
-        )
-
-        meses_disponiveis = sorted(df[df["ano"] == custom_ano]["mes"].unique())
-        opcoes_meses = ["Todo o ano"] + [MESES_LABEL[m] for m in meses_disponiveis]
-
-        custom_mes_label = st.selectbox(
-            "Mês",
-            options=opcoes_meses,
-            index=opcoes_meses.index(st.session_state["custom_mes_label"])
-            if st.session_state["custom_mes_label"] in opcoes_meses
-            else 0,
-            key="custom_mes_label",
-        )
-
-        aplicar = st.button("Aplicar")
-
-    # Só aplica quando clicar "Aplicar"
-    if "custom_aplicado" not in st.session_state:
-        st.session_state["custom_aplicado"] = False
-
-    if aplicar:
-        st.session_state["custom_aplicado"] = True
-        trigger_sheet_reload()
-
-    if st.session_state.get("custom_aplicado", False):
-        if custom_mes_label == "Todo o ano":
-            df_periodo = df[df["ano"] == custom_ano].copy()
-        else:
-            mes_num_sel = [k for k, v in MESES_LABEL.items() if v == custom_mes_label][0]
-            df_periodo = df[(df["ano"] == custom_ano) & (df["mes"] == mes_num_sel)].copy()
+if st.session_state.get("use_custom", False):
+    # Só entra aqui quando clicar em "Aplicar"
+    if st.session_state["custom_mes_label"] == "Todo o ano":
+        df_periodo = df[df["ano"] == st.session_state["custom_ano"]].copy()
     else:
-        # Antes do primeiro "Aplicar", mantém o padrão (Últimos 7 dias)
+        mes_num_sel = [k for k, v in MESES_LABEL.items() if v == st.session_state["custom_mes_label"]][0]
+        df_periodo = df[(df["ano"] == st.session_state["custom_ano"]) & (df["mes"] == mes_num_sel)].copy()
+else:
+    if periodo_sel == "Hoje":
+        df_periodo = df[df["data"] == hoje].copy()
+
+    elif periodo_sel == "Ontem":
+        df_periodo = df[df["data"] == ontem].copy()
+
+    elif periodo_sel == "Últimos 7 dias":
+        # Ex.: 12/12 -> 05/12 a 11/12 (exclui hoje)
         start = hoje - timedelta(days=7)
+        end = ontem
+        df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
+
+    elif periodo_sel == "Este mês":
+        start = date(hoje.year, hoje.month, 1)
+        end = ontem
+        df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
+
+    elif periodo_sel == "Este ano":
+        start = date(hoje.year, 1, 1)
         end = ontem
         df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
 
@@ -378,7 +372,6 @@ if conv_total > 0:
 else:
     pct_top = 0.0
 
-# KPIs em colunas com a coluna 3 mais larga
 col1, col2, col3, col4 = st.columns([1, 1, 2, 1])
 
 GREEN_COLOR = "#22c55e"
@@ -427,11 +420,11 @@ st.plotly_chart(fig_dia, use_container_width=True)
 # RANKING DE MESES (APENAS QUANDO O PERÍODO FILTRADO FOR "ANO INTEIRO")
 # -----------------------------
 show_ranking_meses = False
-if periodo_sel == "Personalizado":
-    if st.session_state.get("custom_aplicado", False) and st.session_state.get("custom_mes_label") == "Todo o ano":
+if st.session_state.get("use_custom", False):
+    if st.session_state.get("custom_mes_label") == "Todo o ano":
         show_ranking_meses = True
 else:
-    if periodo_sel in ["Este ano"]:
+    if periodo_sel == "Este ano":
         show_ranking_meses = True
 
 if show_ranking_meses:
