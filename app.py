@@ -3,6 +3,8 @@ import pandas as pd
 import plotly.express as px
 import gspread
 from google.oauth2.service_account import Credentials
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 # -----------------------------
 # PROTEÇÃO POR SENHA
@@ -61,11 +63,12 @@ DIA_SEMANA_LABEL = {
     6: "Domingo",
 }
 
+
 # -----------------------------
-# FUNÇÃO PARA NORMALIZAR false/undefined/etc
-# (SEM ALTERAR MAIÚSCULA/MINÚSCULA ORIGINAL)
+# FUNÇÕES UTILITÁRIAS
 # -----------------------------
 def normalize_empty(value):
+    """Normaliza valores vazios/false/undefined/etc sem alterar o texto válido (maiúsc./minúsc.)."""
     if pd.isna(value):
         return None
     text = str(value).strip()
@@ -73,6 +76,20 @@ def normalize_empty(value):
     if low in ["false", "none", "null", "undefined", "", "nan"]:
         return None
     return text  # devolve o texto ORIGINAL
+
+
+def get_today_local() -> date:
+    """Retorna a data de hoje considerando fuso BR (se disponível); senão usa data local do servidor."""
+    try:
+        return datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+    except Exception:
+        return date.today()
+
+
+def trigger_sheet_reload():
+    """Força releitura da planilha (mesmo efeito do botão 'Atualizar Informações')."""
+    load_all_data.clear()
+    st.rerun()
 
 
 # -----------------------------
@@ -88,14 +105,12 @@ def load_all_data():
 
     # usa secrets no Streamlit Cloud; usa arquivo local se estiver rodando na máquina
     if "gcp_service_account" in st.secrets:
-        # st.secrets["gcp_service_account"] vem do [gcp_service_account] no secrets.toml
         service_info = dict(st.secrets["gcp_service_account"])
         creds = Credentials.from_service_account_info(
             service_info,
             scopes=SCOPES,
         )
     else:
-        # opcional: só funciona se você tiver o JSON local na máquina
         creds = Credentials.from_service_account_file(
             "credenciais_sheets.json",
             scopes=SCOPES,
@@ -183,13 +198,13 @@ def load_all_data():
 
 
 # -----------------------------
-# DASHBOARD
+# SIDEBAR: ATUALIZAR + FILTROS DE PERÍODO (NOVO)
 # -----------------------------
-# botão para limpar cache e recarregar do Sheets
+# Botão "Atualizar Informações" (como já está)
 if st.sidebar.button("🔄 Atualizar Informações"):
-    load_all_data.clear()   # limpa o cache
-    st.rerun()              # recarrega o app
+    trigger_sheet_reload()
 
+# Carrega dados
 df = load_all_data()
 
 st.title("📊 Relatório de Leads no Site NextQS")
@@ -198,35 +213,122 @@ if df.empty:
     st.warning("Nenhum dado encontrado na planilha do Google Sheets.")
     st.stop()
 
-# Período disponível (sempre antes dos KPIs)
+# Período disponível
 st.caption(
     f"Período disponível: {df['data'].min()} até {df['data'].max()} "
     f"({df['ano'].min()} - {df['ano'].max()})"
 )
 
+# Defaults / estado
+PERIODOS = ["Hoje", "Ontem", "Últimos 7 dias", "Este mês", "Este ano", "Personalizado"]
+if "periodo_sel" not in st.session_state:
+    st.session_state["periodo_sel"] = "Últimos 7 dias"  # padrão ao abrir
+if "periodo_sel_prev" not in st.session_state:
+    st.session_state["periodo_sel_prev"] = st.session_state["periodo_sel"]
+
+# Rádio (bolinhas)
+periodo_sel = st.sidebar.radio(
+    label="",
+    options=PERIODOS,
+    index=PERIODOS.index(st.session_state["periodo_sel"]),
+    key="periodo_sel",
+)
+
+# Quando mudar qualquer opção (inclusive entrar em Personalizado),
+# faz a releitura da planilha (mesmo do botão).
+if periodo_sel != st.session_state.get("periodo_sel_prev"):
+    st.session_state["periodo_sel_prev"] = periodo_sel
+    trigger_sheet_reload()
+
 # -----------------------------
-# SIDEBAR: FILTROS DE ANO / MÊS
+# APLICAR FILTRO DE PERÍODO
 # -----------------------------
-st.sidebar.header("Filtros de período")
+hoje = get_today_local()
+ontem = hoje - timedelta(days=1)
 
-anos_disponiveis = sorted(df["ano"].unique())
-ano_sel = st.sidebar.selectbox("Ano", options=anos_disponiveis, index=len(anos_disponiveis) - 1)
+df_periodo = df.copy()
 
-meses_disponiveis = sorted(df[df["ano"] == ano_sel]["mes"].unique())
-opcoes_meses = ["Todo o ano"] + [MESES_LABEL[m] for m in meses_disponiveis]
-mes_label_sel = st.sidebar.selectbox("Mês", options=opcoes_meses, index=0)
+if periodo_sel == "Hoje":
+    df_periodo = df[df["data"] == hoje].copy()
 
-if mes_label_sel == "Todo o ano":
-    df_periodo = df[df["ano"] == ano_sel].copy()
-else:
-    mes_num_sel = [k for k, v in MESES_LABEL.items() if v == mes_label_sel][0]
-    df_periodo = df[(df["ano"] == ano_sel) & (df["mes"] == mes_num_sel)].copy()
+elif periodo_sel == "Ontem":
+    df_periodo = df[df["data"] == ontem].copy()
 
+elif periodo_sel == "Últimos 7 dias":
+    # EXEMPLO do usuário: 12/12 -> 05/12 a 11/12 (exclui hoje)
+    start = hoje - timedelta(days=7)
+    end = ontem
+    df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
+
+elif periodo_sel == "Este mês":
+    start = date(hoje.year, hoje.month, 1)
+    end = ontem
+    df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
+
+elif periodo_sel == "Este ano":
+    start = date(hoje.year, 1, 1)
+    end = ontem
+    df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
+
+elif periodo_sel == "Personalizado":
+    # "setinha": expander
+    with st.sidebar.expander("Personalizado", expanded=True):
+        anos_disponiveis = sorted(df["ano"].unique())
+        ano_default = anos_disponiveis[-1] if anos_disponiveis else hoje.year
+
+        if "custom_ano" not in st.session_state:
+            st.session_state["custom_ano"] = ano_default
+        if "custom_mes_label" not in st.session_state:
+            st.session_state["custom_mes_label"] = "Todo o ano"
+
+        custom_ano = st.selectbox(
+            "Ano",
+            options=anos_disponiveis,
+            index=anos_disponiveis.index(st.session_state["custom_ano"])
+            if st.session_state["custom_ano"] in anos_disponiveis
+            else len(anos_disponiveis) - 1,
+            key="custom_ano",
+        )
+
+        meses_disponiveis = sorted(df[df["ano"] == custom_ano]["mes"].unique())
+        opcoes_meses = ["Todo o ano"] + [MESES_LABEL[m] for m in meses_disponiveis]
+
+        custom_mes_label = st.selectbox(
+            "Mês",
+            options=opcoes_meses,
+            index=opcoes_meses.index(st.session_state["custom_mes_label"])
+            if st.session_state["custom_mes_label"] in opcoes_meses
+            else 0,
+            key="custom_mes_label",
+        )
+
+        aplicar = st.button("Aplicar")
+
+    # Só aplica quando clicar "Aplicar"
+    if "custom_aplicado" not in st.session_state:
+        st.session_state["custom_aplicado"] = False
+
+    if aplicar:
+        st.session_state["custom_aplicado"] = True
+        trigger_sheet_reload()
+
+    if st.session_state.get("custom_aplicado", False):
+        if custom_mes_label == "Todo o ano":
+            df_periodo = df[df["ano"] == custom_ano].copy()
+        else:
+            mes_num_sel = [k for k, v in MESES_LABEL.items() if v == custom_mes_label][0]
+            df_periodo = df[(df["ano"] == custom_ano) & (df["mes"] == mes_num_sel)].copy()
+    else:
+        # Antes do primeiro "Aplicar", mantém o padrão (Últimos 7 dias)
+        start = hoje - timedelta(days=7)
+        end = ontem
+        df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
+
+# Proteção para casos sem dados no período
 if df_periodo.empty:
     st.warning("Nenhum Lead encontrado para o período selecionado.")
     st.stop()
 
-# Período filtrado (também antes dos KPIs)
 st.caption(
     f"Período filtrado: {df_periodo['data'].min()} até {df_periodo['data'].max()}"
 )
@@ -272,16 +374,13 @@ origem_top = (
 
 if conv_total > 0:
     dist_dispositivos = df_filtrado["dispositivo"].value_counts(normalize=True) * 100
-    dispositivo_top = dist_dispositivos.idxmax()
     pct_top = dist_dispositivos.iloc[0]
 else:
-    dispositivo_top = "-"
     pct_top = 0.0
 
 # KPIs em colunas com a coluna 3 mais larga
 col1, col2, col3, col4 = st.columns([1, 1, 2, 1])
 
-# Cor verde para indicar resultado positivo
 GREEN_COLOR = "#22c55e"
 
 with col1:
@@ -325,9 +424,17 @@ fig_dia.update_layout(xaxis_title="Data", yaxis_title="Leads")
 st.plotly_chart(fig_dia, use_container_width=True)
 
 # -----------------------------
-# RANKING DE MESES (APENAS QUANDO "TODO O ANO" ESTIVER SELECIONADO)
+# RANKING DE MESES (APENAS QUANDO O PERÍODO FILTRADO FOR "ANO INTEIRO")
 # -----------------------------
-if mes_label_sel == "Todo o ano":
+show_ranking_meses = False
+if periodo_sel == "Personalizado":
+    if st.session_state.get("custom_aplicado", False) and st.session_state.get("custom_mes_label") == "Todo o ano":
+        show_ranking_meses = True
+else:
+    if periodo_sel in ["Este ano"]:
+        show_ranking_meses = True
+
+if show_ranking_meses:
     st.subheader("Ordem dos Meses com mais Conversões (Leads únicos)")
 
     ranking_meses = (
@@ -400,10 +507,8 @@ with col_g2:
 # -----------------------------
 # RANKING: CAMPANHAS + PALAVRAS-CHAVE (LISTAS)
 # -----------------------------
-
 col_rank1, col_rank2 = st.columns(2)
 
-# ---- Lista de utm_campaign ----
 with col_rank1:
     st.markdown("### Campanhas")
 
@@ -421,7 +526,6 @@ with col_rank1:
     else:
         st.info("Nenhuma campanha válida encontrada no período.")
 
-# ---- Lista de utm_term ----
 with col_rank2:
     st.markdown("### Termos de Pesquisa")
 
