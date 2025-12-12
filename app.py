@@ -237,21 +237,30 @@ if "custom_mes_label" not in st.session_state:
     st.session_state["custom_mes_label"] = "Todo o ano"
 
 # Rádio (bolinhas) - somente períodos rápidos
-periodo_sel = st.sidebar.radio(
-    label="",
-    options=PERIODOS,
-    index=PERIODOS.index(st.session_state["periodo_sel"]),
-    key="periodo_sel",
-)
+# Quando o Personalizado está ativo, escondemos o rádio para não ficar confuso.
+periodo_sel = st.session_state["periodo_sel"]
 
-# Mudou período rápido -> desliga custom e recarrega
-if periodo_sel != st.session_state.get("periodo_sel_prev"):
-    st.session_state["periodo_sel_prev"] = periodo_sel
-    st.session_state["use_custom"] = False
-    trigger_sheet_reload()
+if st.session_state.get("use_custom", False):
+    st.sidebar.markdown("**Personalizado ativo**")
+    if st.sidebar.button("Usar período rápido"):
+        st.session_state["use_custom"] = False
+        trigger_sheet_reload()
+else:
+    periodo_sel = st.sidebar.radio(
+        label="",
+        options=PERIODOS,
+        index=PERIODOS.index(st.session_state["periodo_sel"]),
+        key="periodo_sel",
+    )
+
+    # Mudou período rápido -> desliga custom e recarrega
+    if periodo_sel != st.session_state.get("periodo_sel_prev"):
+        st.session_state["periodo_sel_prev"] = periodo_sel
+        st.session_state["use_custom"] = False
+        trigger_sheet_reload()
 
 # Personalizado (seta para baixo). NÃO recarrega ao trocar ano/mês.
-with st.sidebar.expander("Personalizado ▾", expanded=False):
+with st.sidebar.expander("Personalizado", expanded=False):
     anos_disponiveis = sorted(df["ano"].unique())
     if anos_disponiveis and st.session_state["custom_ano"] not in anos_disponiveis:
         st.session_state["custom_ano"] = anos_disponiveis[-1]
@@ -305,12 +314,12 @@ else:
     elif periodo_sel == "Últimos 7 dias":
         # Ex.: 12/12 -> 05/12 a 11/12 (exclui hoje)
         start = hoje - timedelta(days=7)
-        end = ontem
+        end = hoje
         df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
 
     elif periodo_sel == "Este mês":
         start = date(hoje.year, hoje.month, 1)
-        end = ontem
+        end = hoje
         df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
 
     elif periodo_sel == "Este ano":
