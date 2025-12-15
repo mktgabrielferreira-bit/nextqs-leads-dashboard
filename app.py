@@ -269,7 +269,7 @@ elif periodo_sel == "Este mês":
 
 elif periodo_sel == "Este ano":
     start = date(hoje.year, 1, 1)
-    end = ontem
+    end = hoje
     df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
 
 elif periodo_sel == "Personalizado":
