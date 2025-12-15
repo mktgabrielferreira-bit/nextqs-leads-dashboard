@@ -203,9 +203,8 @@ def load_all_data():
 # -----------------------------
 # SIDEBAR: ATUALIZAR + FILTROS DE PERÍODO (NOVO)
 # -----------------------------
-# Botão "Atualizar Informações" (como já está)
-if st.sidebar.button("🔄 Atualizar Informações"):
-    trigger_sheet_reload()
+
+st.sidebar.markdown("## Filtros")
 
 # Carrega dados
 df = load_all_data()
