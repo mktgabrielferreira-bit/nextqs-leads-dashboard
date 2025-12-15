@@ -155,6 +155,9 @@ def load_all_data():
         lambda x: x if x == "Dispositivo não identificado" else str(x).capitalize()
     )
 
+    # Ajuste para manter "iOS" em maiúsculas
+    df["dispositivo"] = df["dispositivo"].replace({"Mobile - ios": "Mobile - iOS"})
+
     # converte data_hora (formato: 04/12/2025 - 14:45:58)
     df["data_hora"] = pd.to_datetime(
         df["data_hora"],
@@ -374,10 +377,10 @@ origem_top = (
 
 if conv_total > 0:
     dist_dispositivos = df_filtrado["dispositivo"].value_counts(normalize=True) * 100
-    top_disp = dist_dispositivos.index[0]
-    pct_top = float(dist_dispositivos.iloc[0])
+    dispositivo_top = dist_dispositivos.index[0]  # já vem em ordem desc
+    pct_top = float(dist_dispositivos.loc[dispositivo_top])
 else:
-    top_disp = "Dispositivo"
+    dispositivo_top = "-"
     pct_top = 0.0
 
 # KPIs em colunas com a coluna 3 mais larga
@@ -407,7 +410,7 @@ with col3:
     )
 
 with col4:
-    st.text(f"{top_disp} (%)")
+    st.text(f"{dispositivo_top} (%)")
     st.markdown(
         f"<span style='font-size:32px; font-weight:bold; color:{GREEN_COLOR}'>{pct_top:.1f}%</span>",
         unsafe_allow_html=True,
