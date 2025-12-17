@@ -577,20 +577,65 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
     st.markdown("---")
 
     # -----------------------------
-    # GRÁFICO: LEADS POR DIA (2 LINHAS)
+    # GRÁFICO: LEADS POR DIA ou POR HORA (2 LINHAS)
     # -----------------------------
-    st.subheader("Leads por Dia")
+    if periodo_sel in ["Hoje", "Ontem"]:
+        st.subheader("Leads por Hora")
 
-    conv_por_dia_1 = df_m1.groupby("data").size().reset_index(name="leads")
-    conv_por_dia_2 = df_m2.groupby("data").size().reset_index(name="leads")
+        conv_hora_1 = df_m1.groupby("hora").size().reset_index(name="leads")
+        conv_hora_2 = df_m2.groupby("hora").size().reset_index(name="leads")
 
-    fig_dia = go.Figure()
-    if not conv_por_dia_1.empty:
-        fig_dia.add_trace(go.Scatter(x=conv_por_dia_1["data"], y=conv_por_dia_1["leads"], mode="lines", name=f"{m1_label}/{ano_sel}", line=dict(color=M1_COLOR)))
-    if not conv_por_dia_2.empty:
-        fig_dia.add_trace(go.Scatter(x=conv_por_dia_2["data"], y=conv_por_dia_2["leads"], mode="lines", name=f"{m2_label}/{ano_sel}", line=dict(color=M2_COLOR)))
-    fig_dia.update_layout(xaxis_title="Data", yaxis_title="Leads")
-    st.plotly_chart(fig_dia, use_container_width=True)
+        fig = go.Figure()
+        if not conv_hora_1.empty:
+            fig.add_trace(go.Scatter(
+                x=conv_hora_1["hora"],
+                y=conv_hora_1["leads"],
+                mode="lines+markers",
+                name=f"{m1_label}/{ano_sel}",
+                line=dict(color=M1_COLOR),
+            ))
+        if not conv_hora_2.empty:
+            fig.add_trace(go.Scatter(
+                x=conv_hora_2["hora"],
+                y=conv_hora_2["leads"],
+                mode="lines+markers",
+                name=f"{m2_label}/{ano_sel}",
+                line=dict(color=M2_COLOR),
+            ))
+
+        fig.update_layout(
+            xaxis_title="Hora do dia",
+            yaxis_title="Leads",
+            xaxis=dict(dtick=1),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    else:
+        st.subheader("Leads por Dia")
+
+        conv_por_dia_1 = df_m1.groupby("data").size().reset_index(name="leads")
+        conv_por_dia_2 = df_m2.groupby("data").size().reset_index(name="leads")
+
+        fig = go.Figure()
+        if not conv_por_dia_1.empty:
+            fig.add_trace(go.Scatter(
+                x=conv_por_dia_1["data"],
+                y=conv_por_dia_1["leads"],
+                mode="lines",
+                name=f"{m1_label}/{ano_sel}",
+                line=dict(color=M1_COLOR),
+            ))
+        if not conv_por_dia_2.empty:
+            fig.add_trace(go.Scatter(
+                x=conv_por_dia_2["data"],
+                y=conv_por_dia_2["leads"],
+                mode="lines",
+                name=f"{m2_label}/{ano_sel}",
+                line=dict(color=M2_COLOR),
+            ))
+
+        fig.update_layout(xaxis_title="Data", yaxis_title="Leads")
+        st.plotly_chart(fig, use_container_width=True)
 
     # -----------------------------
     # LINHA 2: ORIGEM x EVENTO (COMPARAÇÃO)
@@ -806,14 +851,25 @@ else:
     st.markdown("---")
 
     # -----------------------------
-    # GRÁFICO: LEADS POR DIA
+    # GRÁFICO: LEADS POR DIA ou POR HORA (quando Hoje/Ontem)
     # -----------------------------
-    st.subheader("Leads por Dia")
+    if periodo_sel in ["Hoje", "Ontem"]:
+        st.subheader("Leads por Hora")
 
-    conv_por_dia = df_filtrado.groupby("data").size().reset_index(name="leads")
-    fig_dia = px.line(conv_por_dia, x="data", y="leads")
-    fig_dia.update_layout(xaxis_title="Data", yaxis_title="Leads")
-    st.plotly_chart(fig_dia, use_container_width=True)
+        conv_por_hora_dia = df_filtrado.groupby("hora").size().reset_index(name="leads")
+        conv_por_hora_dia = conv_por_hora_dia.sort_values("hora")
+
+        fig_hora_dia = px.bar(conv_por_hora_dia, x="hora", y="leads")
+        fig_hora_dia.update_layout(xaxis_title="Hora do dia", yaxis_title="Leads", xaxis=dict(dtick=1))
+        st.plotly_chart(fig_hora_dia, use_container_width=True)
+
+    else:
+        st.subheader("Leads por Dia")
+
+        conv_por_dia = df_filtrado.groupby("data").size().reset_index(name="leads")
+        fig_dia = px.line(conv_por_dia, x="data", y="leads")
+        fig_dia.update_layout(xaxis_title="Data", yaxis_title="Leads")
+        st.plotly_chart(fig_dia, use_container_width=True)
 
     # -----------------------------
     # RANKING DE MESES (APENAS QUANDO O PERÍODO FILTRADO FOR "ANO INTEIRO")
