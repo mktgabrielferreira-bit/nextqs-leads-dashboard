@@ -420,31 +420,47 @@ elif periodo_sel == "Comparar meses":
         M1_COLOR = "#2563EB"  # azul
         M2_COLOR = "#F97316"  # laranja
 
-        st.markdown(
-            f"**Mês 1** <span style='display:inline-block;width:10px;height:10px;border-radius:50%;background:{M1_COLOR};margin-left:6px'></span>",
-            unsafe_allow_html=True,
-        )
-        compare_mes1_label = st.selectbox(
-            " ",
-            options=opcoes_meses,
-            index=opcoes_meses.index(st.session_state["compare_mes1_label"])
-            if st.session_state["compare_mes1_label"] in opcoes_meses
-            else len(opcoes_meses) - 1,
-            key="compare_mes1_label",
-        )
+        # Mês 1 (label + cor + seletor na mesma linha)
+        col_label_1, col_select_1 = st.columns([1, 3])
+        with col_label_1:
+            st.markdown(
+                f"<div style='display:flex;align-items:center;gap:6px;'>"
+                f"<strong>Mês 1</strong>"
+                f"<span style='width:10px;height:10px;border-radius:50%;background:{M1_COLOR};display:inline-block;'></span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        with col_select_1:
+            compare_mes1_label = st.selectbox(
+                "",
+                options=opcoes_meses,
+                index=opcoes_meses.index(st.session_state["compare_mes1_label"])
+                if st.session_state["compare_mes1_label"] in opcoes_meses
+                else len(opcoes_meses) - 1,
+                key="compare_mes1_label",
+                label_visibility="collapsed",
+            )
 
-        st.markdown(
-            f"**Mês 2** <span style='display:inline-block;width:10px;height:10px;border-radius:50%;background:{M2_COLOR};margin-left:6px'></span>",
-            unsafe_allow_html=True,
-        )
-        compare_mes2_label = st.selectbox(
-            "  ",
-            options=opcoes_meses,
-            index=opcoes_meses.index(st.session_state["compare_mes2_label"])
-            if st.session_state["compare_mes2_label"] in opcoes_meses
-            else max(len(opcoes_meses) - 2, 0),
-            key="compare_mes2_label",
-        )
+        # Mês 2 (label + cor + seletor na mesma linha)
+        col_label_2, col_select_2 = st.columns([1, 3])
+        with col_label_2:
+            st.markdown(
+                f"<div style='display:flex;align-items:center;gap:6px;'>"
+                f"<strong>Mês 2</strong>"
+                f"<span style='width:10px;height:10px;border-radius:50%;background:{M2_COLOR};display:inline-block;'></span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        with col_select_2:
+            compare_mes2_label = st.selectbox(
+                "",
+                options=opcoes_meses,
+                index=opcoes_meses.index(st.session_state["compare_mes2_label"])
+                if st.session_state["compare_mes2_label"] in opcoes_meses
+                else max(len(opcoes_meses) - 2, 0),
+                key="compare_mes2_label",
+                label_visibility="collapsed",
+            )
 
         aplicar_compare = st.button("Aplicar")
 
