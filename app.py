@@ -280,16 +280,14 @@ st.caption(
 
 # Defaults / estado
 PERIODOS = ["Hoje", "Ontem", "Últimos 7 dias", "Este mês", "Este ano", "Personalizado", "Comparar meses"]
-if "periodo_sel" not in st.session_state:
-    st.session_state["periodo_sel"] = "Últimos 7 dias"  # padrão ao abrir
-if "periodo_sel_prev" not in st.session_state:
-    st.session_state["periodo_sel_prev"] = st.session_state["periodo_sel"]
+
+st.session_state.setdefault("periodo_sel", "Últimos 7 dias")
+st.session_state.setdefault("periodo_sel_prev", st.session_state["periodo_sel"])
 
 # Rádio (bolinhas)
 periodo_sel = st.sidebar.radio(
     label="",
     options=PERIODOS,
-    index=PERIODOS.index(st.session_state["periodo_sel"]),
     key="periodo_sel",
 )
 
