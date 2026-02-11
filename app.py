@@ -329,41 +329,55 @@ def get_period_filtered_df(df_src: pd.DataFrame, periodo_sel: str, hoje: date, o
     return df_src.copy()
 
 
-def build_funnel_figure(title: str, steps: list[tuple[str, int]], base_color: str) -> go.Figure:
+def build_funnel_figure(title: str, steps: list[tuple[str, int]], base_color: str, min_ratio: float = 0.18) -> go.Figure:
     """
-    Funil visual (Plotly) com uma sensação "3D" (sombra/contorno) usando Funnel + layout caprichado.
+    Funil visual (Plotly) com uma sensação "3D" (sombra/contorno).
+    Para evitar que etapas com valores baixos fiquem "finas demais",
+    usamos uma escala visual com largura mínima (min_ratio), mas exibimos
+    os números reais no texto.
     """
     labels = [s[0] for s in steps]
-    values = [int(s[1]) for s in steps]
+    values_real = [max(0, int(s[1])) for s in steps]
+
+    # escala visual com largura mínima (sem aumentar visualmente acima do degrau anterior)
+    maxv = max(values_real) if values_real else 1
+    minv = max(1, int(round(maxv * float(min_ratio))))
+    scaled = []
+    prev = maxv
+    for v in values_real:
+        target = max(v, minv)
+        sv = min(prev, target)
+        scaled.append(sv)
+        prev = sv
 
     fig = go.Figure()
-
     fig.add_trace(
         go.Funnel(
             name=title,
             y=labels,
-            x=values,
-            textinfo="value+percent initial",
+            x=scaled,  # largura visual
+            customdata=values_real,  # números reais
+            texttemplate="%{customdata}<br>%{percentInitial:.0%}",
             textposition="inside",
+            hovertemplate="<b>%{y}</b><br>Quantidade: %{customdata}<br>%{percentInitial:.1%} do início<extra></extra>",
             marker=dict(
                 color=base_color,
-                line=dict(color="rgba(0,0,0,0.25)", width=2),
+                line=dict(color="rgba(0,0,0,0.28)", width=2),
             ),
-            connector=dict(line=dict(color="rgba(0,0,0,0.2)", width=1)),
-            opacity=0.92,
+            connector=dict(line=dict(color="rgba(0,0,0,0.22)", width=1)),
+            opacity=0.95,
         )
     )
 
     fig.update_layout(
         title=dict(text=title, x=0.5, xanchor="center"),
-        margin=dict(l=10, r=10, t=50, b=10),
+        margin=dict(l=10, r=10, t=55, b=10),
         height=420,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(size=14),
     )
     return fig
-
 
 def compute_funnel_counts(
     df_sessions: pd.DataFrame,
@@ -647,8 +661,10 @@ def render_funnels_section(
     df_leads_base: pd.DataFrame,
     origens_sel,
     dispositivos_sel,
+    show_title: bool = True,
 ):
-    st.subheader("Funis (Sessões → Conversões)")
+    if show_title:
+        st.subheader("Funis de Conversão no Site")
 
     # WhatsApp
     w_sessions, w_clicks, w_starts, w_convs = compute_funnel_counts(
@@ -681,7 +697,7 @@ def render_funnels_section(
             ("Começaram a preencher", w_starts),
             ("Converteram", w_convs),
         ]
-        fig_w = build_funnel_figure("WhatsApp", steps_w, base_color="#8b5cf6")
+        fig_w = build_funnel_figure("WhatsApp", steps_w, base_color="#25D366")
         st.plotly_chart(fig_w, use_container_width=True)
 
     with col_f:
@@ -691,10 +707,8 @@ def render_funnels_section(
             ("Começaram a preencher", f_starts),
             ("Converteram", f_convs),
         ]
-        fig_f = build_funnel_figure("Formulário", steps_f, base_color="#a78bfa")
+        fig_f = build_funnel_figure("Formulário", steps_f, base_color="#F97316")
         st.plotly_chart(fig_f, use_container_width=True)
-
-    st.caption("Obs.: cada linha em cada aba conta como 1 etapa (sessão/clique/início/conversão).")
 
 
 if compare_mode and st.session_state.get("compare_aplicado", False):
@@ -742,41 +756,6 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
             kpi_value_html(f"{disp_top_1} {pct_top_1:.1f}%", M1_COLOR)
             + kpi_value_html(f"{disp_top_2} {pct_top_2:.1f}%", M2_COLOR),
             unsafe_allow_html=True,
-        )
-
-    st.markdown("---")
-
-    # Funis: em tabs por mês, sempre usando leads do mês (MAS ignorando filtro de evento para conversão)
-    st.markdown("### Funis (por mês)")
-    tab_f1, tab_f2 = st.tabs([f"{m1_label}/{ano_sel}", f"{m2_label}/{ano_sel}"])
-
-    def ym(df_, mes_num):
-        if df_.empty:
-            return df_
-        return df_[(df_["ano"] == ano_sel) & (df_["mes"] == mes_num)].copy()
-
-    with tab_f1:
-        render_funnels_section(
-            ym(dfs["sessions"], m1_num),
-            ym(dfs["click_whatsapp"], m1_num),
-            ym(dfs["form_start_whatsapp"], m1_num),
-            ym(dfs["click_formulario"], m1_num),
-            ym(dfs["form_start_formulario"], m1_num),
-            df_m1_leads_base,  # base (sem filtro de evento)
-            origens_sel,
-            dispositivos_sel,
-        )
-
-    with tab_f2:
-        render_funnels_section(
-            ym(dfs["sessions"], m2_num),
-            ym(dfs["click_whatsapp"], m2_num),
-            ym(dfs["form_start_whatsapp"], m2_num),
-            ym(dfs["click_formulario"], m2_num),
-            ym(dfs["form_start_formulario"], m2_num),
-            df_m2_leads_base,  # base (sem filtro de evento)
-            origens_sel,
-            dispositivos_sel,
         )
 
     st.markdown("---")
@@ -840,7 +819,46 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
         fig.update_layout(xaxis_title="Data", yaxis_title="Leads")
         st.plotly_chart(fig, use_container_width=True)
 
-    # LINHA 2: ORIGEM x EVENTO (COMPARAÇÃO)
+    # Funis: em tabs por mês, sempre usando leads do mês (MAS ignorando filtro de evento para conversão)
+    st.subheader("Funis de Conversão no Site")
+    st.markdown("### Funis (por mês)")
+    tab_f1, tab_f2 = st.tabs([f"{m1_label}/{ano_sel}", f"{m2_label}/{ano_sel}"])
+
+    def ym(df_, mes_num):
+        if df_.empty:
+            return df_
+        return df_[(df_["ano"] == ano_sel) & (df_["mes"] == mes_num)].copy()
+
+    with tab_f1:
+        render_funnels_section(
+            ym(dfs["sessions"], m1_num),
+            ym(dfs["click_whatsapp"], m1_num),
+            ym(dfs["form_start_whatsapp"], m1_num),
+            ym(dfs["click_formulario"], m1_num),
+            ym(dfs["form_start_formulario"], m1_num),
+            df_m1_leads_base,  # base (sem filtro de evento)
+            origens_sel,
+            dispositivos_sel,
+            show_title=False,
+        )
+
+    with tab_f2:
+        render_funnels_section(
+            ym(dfs["sessions"], m2_num),
+            ym(dfs["click_whatsapp"], m2_num),
+            ym(dfs["form_start_whatsapp"], m2_num),
+            ym(dfs["click_formulario"], m2_num),
+            ym(dfs["form_start_formulario"], m2_num),
+            df_m2_leads_base,  # base (sem filtro de evento)
+            origens_sel,
+            dispositivos_sel,
+            show_title=False,
+        )
+
+    st.markdown("---")
+
+    
+# LINHA 2: ORIGEM x EVENTO (COMPARAÇÃO)
     col_g1, col_g2 = st.columns(2)
 
     with col_g1:
@@ -1031,19 +1049,6 @@ else:
 
     st.markdown("---")
 
-    # FUNIS (ignorando filtro de evento — só respeita Origem/Dispositivo e Período)
-    render_funnels_section(
-        df_periodo_sessions,
-        df_periodo_click_whatsapp,
-        df_periodo_form_start_whatsapp,
-        df_periodo_click_formulario,
-        df_periodo_form_start_formulario,
-        df_periodo_leads,  # base sem filtro de evento (mas com período)
-        origens_sel,
-        dispositivos_sel,
-    )
-
-    st.markdown("---")
 
     # GRÁFICO: LEADS POR DIA ou POR HORA (quando Hoje/Ontem)
     if periodo_sel in ["Hoje", "Ontem"]:
@@ -1059,7 +1064,24 @@ else:
         fig_dia.update_layout(xaxis_title="Data", yaxis_title="Leads")
         st.plotly_chart(fig_dia, use_container_width=True)
 
-    # RANKING DE MESES (APENAS QUANDO O PERÍODO FILTRADO FOR "ANO INTEIRO")
+        st.markdown("---")
+
+    # FUNIS (Sessões -> Conversões) — respeita Origem/Dispositivo e Período (conversão via leads por evento)
+    render_funnels_section(
+        df_periodo_sessions,
+        df_periodo_click_whatsapp,
+        df_periodo_form_start_whatsapp,
+        df_periodo_click_formulario,
+        df_periodo_form_start_formulario,
+        df_periodo_leads,  # base sem filtro de evento (mas com período)
+        origens_sel,
+        dispositivos_sel,
+        show_title=True,
+    )
+
+    st.markdown("---")
+
+# RANKING DE MESES (APENAS QUANDO O PERÍODO FILTRADO FOR "ANO INTEIRO")
     show_ranking_meses = False
     if periodo_sel == "Personalizado":
         if st.session_state.get("custom_aplicado", False) and st.session_state.get("custom_mes_label") == "Todo o ano":
