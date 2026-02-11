@@ -7,12 +7,11 @@ from google.oauth2.service_account import Credentials
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-# -----------------------------
+# =============================================================================
 # PROTEÇÃO POR SENHA
-# -----------------------------
+# =============================================================================
 def login():
     st.title("🔒 Acesso restrito")
-
     senha = st.text_input("Digite a senha:", type="password")
 
     if st.button("Entrar"):
@@ -29,16 +28,15 @@ if not st.session_state["autenticado"]:
     login()
     st.stop()
 
-
 st.set_page_config(
     page_title="Relatório de Leads NextQS",
     page_icon="📊",
-    layout="wide"
+    layout="wide",
 )
 
-# -----------------------------
+# =============================================================================
 # MAPAS AUXILIARES
-# -----------------------------
+# =============================================================================
 MESES_LABEL = {
     1: "Janeiro",
     2: "Fevereiro",
@@ -64,9 +62,9 @@ DIA_SEMANA_LABEL = {
     6: "Domingo",
 }
 
-# -----------------------------
+# =============================================================================
 # FUNÇÕES UTILITÁRIAS
-# -----------------------------
+# =============================================================================
 def normalize_empty(value):
     """Normaliza valores vazios/false/undefined/etc sem alterar o texto válido (maiúsc./minúsc.)."""
     if pd.isna(value):
@@ -88,7 +86,7 @@ def get_today_local() -> date:
 
 def trigger_sheet_reload():
     """Força releitura da planilha (mesmo efeito do botão 'Atualizar Informações')."""
-    load_all_data.clear()
+    load_sheet.clear()
     st.rerun()
 
 
@@ -100,7 +98,8 @@ def filter_by_year_month(df: pd.DataFrame, ano: int, mes_num: int) -> pd.DataFra
     return df[(df["ano"] == int(ano)) & (df["mes"] == int(mes_num))].copy()
 
 
-def apply_extra_filters(df_base: pd.DataFrame, eventos_sel, origens_sel, dispositivos_sel) -> pd.DataFrame:
+def apply_extra_filters_leads(df_base: pd.DataFrame, eventos_sel, origens_sel, dispositivos_sel) -> pd.DataFrame:
+    """Filtros do relatório de leads."""
     df_out = df_base[
         (df_base["evento"].isin(eventos_sel))
         & (df_base["origem"].isin(origens_sel))
@@ -109,19 +108,27 @@ def apply_extra_filters(df_base: pd.DataFrame, eventos_sel, origens_sel, disposi
     return df_out.sort_values("data_hora")
 
 
+def apply_common_filters(df_base: pd.DataFrame, origens_sel, dispositivos_sel) -> pd.DataFrame:
+    """Filtros comuns (origem/dispositivo) para abas de funil."""
+    df_out = df_base.copy()
+    if "origem" in df_out.columns:
+        df_out = df_out[df_out["origem"].isin(origens_sel)]
+    if "dispositivo" in df_out.columns:
+        df_out = df_out[df_out["dispositivo"].isin(dispositivos_sel)]
+    if "data_hora" in df_out.columns:
+        df_out = df_out.sort_values("data_hora")
+    return df_out
+
+
 def get_kpis(df_kpi: pd.DataFrame):
     conv_total = len(df_kpi)
-    usuarios_unicos = df_kpi["user_id_email"].nunique() if not df_kpi.empty else 0
+    usuarios_unicos = df_kpi["user_id_email"].nunique() if (not df_kpi.empty and "user_id_email" in df_kpi.columns) else 0
 
-    origem_top = (
-        df_kpi["origem"].value_counts().idxmax()
-        if not df_kpi.empty
-        else "-"
-    )
+    origem_top = df_kpi["origem"].value_counts().idxmax() if (not df_kpi.empty and "origem" in df_kpi.columns) else "-"
 
-    if conv_total > 0:
+    if conv_total > 0 and "dispositivo" in df_kpi.columns:
         dist_dispositivos = df_kpi["dispositivo"].value_counts(normalize=True) * 100
-        dispositivo_top = dist_dispositivos.index[0]  # já vem em ordem desc
+        dispositivo_top = dist_dispositivos.index[0]
         pct_top = float(dist_dispositivos.loc[dispositivo_top])
     else:
         dispositivo_top = "-"
@@ -150,132 +157,256 @@ def render_kpi_single(title: str, v: str, color: str):
     )
 
 
-# -----------------------------
+def label_evento(v):
+    v_str = str(v).strip().lower()
+    if "whats" in v_str:
+        return "WhatsApp"
+    if "form" in v_str:
+        return "Formulário"
+    return str(v).title()
+
+
+def is_whatsapp_event(v) -> bool:
+    return "whats" in str(v).strip().lower()
+
+
+def is_form_event(v) -> bool:
+    s = str(v).strip().lower()
+    # "form" cobre "formulario", "formulário", etc.
+    return "form" in s
+
+
+# =============================================================================
 # CARREGAR DADOS DO GOOGLE SHEETS (PRIVADO)
-# -----------------------------
-@st.cache_data
-def load_all_data():
-    # ID da sua planilha e nome da aba
-    SPREADSHEET_ID = "1M_yYBJxtwbzdleT2VDNcQfe0lSXxDX0hNe7bGm7xKUQ"
-    SHEET_NAME = "eventos"
+# =============================================================================
+SPREADSHEET_ID = "1M_yYBJxtwbzdleT2VDNcQfe0lSXxDX0hNe7bGm7xKUQ"
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
-    SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+SHEETS_REQUIRED = [
+    "leads",
+    "sessions",
+    "click_whatsapp",
+    "click_formulario",
+    "form_start_whatsapp",
+    "form_start_formulario",
+]
 
+
+def _get_creds():
     # usa secrets no Streamlit Cloud; usa arquivo local se estiver rodando na máquina
     if "gcp_service_account" in st.secrets:
         service_info = dict(st.secrets["gcp_service_account"])
-        creds = Credentials.from_service_account_info(
-            service_info,
-            scopes=SCOPES,
-        )
-    else:
-        creds = Credentials.from_service_account_file(
-            "credenciais_sheets.json",
-            scopes=SCOPES,
-        )
+        return Credentials.from_service_account_info(service_info, scopes=SCOPES)
+    return Credentials.from_service_account_file("credenciais_sheets.json", scopes=SCOPES)
 
+
+def _parse_datetime_series(s: pd.Series) -> pd.Series:
+    """
+    Tenta parsear 'data_hora' nos formatos:
+    - 04/12/2025 - 14:45:58
+    - 26/01/2026 - 10:12:13
+    """
+    if s is None or s.empty:
+        return pd.to_datetime(pd.Series([], dtype="datetime64[ns]"))
+
+    # tenta formato padrão do relatório
+    out = pd.to_datetime(
+        s,
+        format="%d/%m/%Y - %H:%M:%S",
+        dayfirst=True,
+        errors="coerce",
+    )
+    # fallback: deixa o pandas tentar (mantém dayfirst)
+    if out.isna().all():
+        out = pd.to_datetime(s, dayfirst=True, errors="coerce")
+    return out
+
+
+def _standardize_common_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Garante colunas comuns e normalização básica (sem 'forçar' maiúsculas/minúsculas)."""
+    if df.empty:
+        return df
+
+    for col in ["origem", "dispositivo", "utm_campaign", "utm_term", "ip_address", "evento", "user_id_email"]:
+        if col not in df.columns:
+            df[col] = None
+
+    # normaliza textos "sujos" (SEM mudar formatação original boa)
+    for col in ["origem", "dispositivo", "utm_campaign", "utm_term", "ip_address", "evento", "user_id_email"]:
+        if col in df.columns:
+            df[col] = df[col].apply(normalize_empty)
+
+    # remove lixos específicos
+    if "utm_campaign" in df.columns:
+        df["utm_campaign"] = df["utm_campaign"].replace(["{campaignname}", "(not set)", "(notset)"], None)
+
+    # aplica valores substitutos (apenas quando col existe)
+    if "origem" in df.columns:
+        df["origem"] = df["origem"].fillna("Origem não identificada")
+    if "dispositivo" in df.columns:
+        df["dispositivo"] = df["dispositivo"].fillna("Dispositivo não identificado")
+        df["dispositivo"] = df["dispositivo"].apply(
+            lambda x: x if x == "Dispositivo não identificado" else str(x).capitalize()
+        )
+        df["dispositivo"] = df["dispositivo"].replace({"Mobile - ios": "Mobile - iOS"})
+    if "ip_address" in df.columns:
+        df["ip_address"] = df["ip_address"].fillna("IP não identificado")
+    if "utm_campaign" in df.columns:
+        df["utm_campaign"] = df["utm_campaign"].fillna("Campanha não identificada")
+    if "utm_term" in df.columns:
+        df["utm_term"] = df["utm_term"].fillna("Palavra-chave não identificada")
+
+    return df
+
+
+@st.cache_data
+def load_sheet(sheet_name: str) -> pd.DataFrame:
+    """
+    Carrega uma aba do Google Sheets e padroniza:
+    - data_hora -> datetime
+    - data/ano/mes/hora/dia_semana
+    - normalização de origem/dispositivo/etc quando existir
+    """
+    creds = _get_creds()
     client = gspread.authorize(creds)
-    sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+    ws = client.open_by_key(SPREADSHEET_ID).worksheet(sheet_name)
 
-    data = sheet.get_all_records()
+    data = ws.get_all_records()
     df = pd.DataFrame(data)
 
     if df.empty:
         return df
 
-    # garante colunas importantes
-    for col in ["origem", "dispositivo", "ip_address", "utm_campaign", "utm_term"]:
-        if col not in df.columns:
-            df[col] = None
+    # padroniza colunas comuns
+    df = _standardize_common_columns(df)
 
-    # normaliza textos "sujos" (SEM mudar formatação original boa)
-    df["origem"] = df["origem"].apply(normalize_empty)
-    df["dispositivo"] = df["dispositivo"].apply(normalize_empty)
-    df["ip_address"] = df["ip_address"].apply(normalize_empty)
-    df["utm_campaign"] = df["utm_campaign"].apply(normalize_empty)
-    df["utm_term"] = df["utm_term"].apply(normalize_empty)
+    # garante data_hora
+    if "data_hora" not in df.columns:
+        # tenta alternativas comuns
+        for alt in ["dataHora", "datetime", "timestamp", "data"]:
+            if alt in df.columns:
+                df["data_hora"] = df[alt]
+                break
+        if "data_hora" not in df.columns:
+            df["data_hora"] = None
 
-    # remove lixos específicos em utm_campaign
-    df["utm_campaign"] = df["utm_campaign"].replace(
-        ["{campaignname}", "(not set)", "(notset)"],
-        None
-    )
-
-    # aplica valores substitutos
-    df["origem"] = df["origem"].fillna("Origem não identificada")
-    df["dispositivo"] = df["dispositivo"].fillna("Dispositivo não identificado")
-    df["ip_address"] = df["ip_address"].fillna("IP não identificado")
-    df["utm_campaign"] = df["utm_campaign"].fillna("Campanha não identificada")
-    df["utm_term"] = df["utm_term"].fillna("Palavra-chave não identificada")
-
-    # DISPOSITIVO: aqui sim padronizamos inicial maiúscula
-    df["dispositivo"] = df["dispositivo"].apply(
-        lambda x: x if x == "Dispositivo não identificado" else str(x).capitalize()
-    )
-
-    # Ajuste para manter "iOS" em maiúsculas
-    df["dispositivo"] = df["dispositivo"].replace({"Mobile - ios": "Mobile - iOS"})
-
-    # converte data_hora (formato: 04/12/2025 - 14:45:58)
-    df["data_hora"] = pd.to_datetime(
-        df["data_hora"],
-        format="%d/%m/%Y - %H:%M:%S",
-        dayfirst=True,
-        errors="coerce",
-    )
-
+    df["data_hora"] = _parse_datetime_series(df["data_hora"])
     df = df.dropna(subset=["data_hora"])
 
-    # colunas derivadas de data
+    # colunas derivadas
     df["data"] = df["data_hora"].dt.date
     df["ano"] = df["data_hora"].dt.year.astype(int)
     df["mes"] = df["data_hora"].dt.month.astype(int)
     df["hora"] = df["data_hora"].dt.hour
     df["dia_semana"] = df["data_hora"].dt.dayofweek.map(DIA_SEMANA_LABEL)
 
-    # organiza colunas finais
-    colunas_base = [
-        "data_hora",
-        "data",
-        "ano",
-        "mes",
-        "hora",
-        "dia_semana",
-        "evento",
-        "ip_address",
-        "dispositivo",
-        "origem",
-        "user_id_email",
-        "utm_campaign",
-        "utm_term",
-    ]
-    for c in colunas_base:
-        if c not in df.columns:
-            df[c] = None
-
-    df = df[colunas_base]
-
     return df
 
 
-# -----------------------------
+def get_period_filtered_df(df_src: pd.DataFrame, periodo_sel: str, hoje: date, ontem: date) -> pd.DataFrame:
+    """Aplica o filtro de período (normal) em qualquer DF que tenha coluna 'data'."""
+    if df_src.empty:
+        return df_src
+
+    if periodo_sel == "Hoje":
+        return df_src[df_src["data"] == hoje].copy()
+    if periodo_sel == "Ontem":
+        return df_src[df_src["data"] == ontem].copy()
+    if periodo_sel == "Últimos 7 dias":
+        start = hoje - timedelta(days=7)
+        end = ontem
+        return df_src[(df_src["data"] >= start) & (df_src["data"] <= end)].copy()
+    if periodo_sel == "Este mês":
+        start = date(hoje.year, hoje.month, 1)
+        end = ontem
+        return df_src[(df_src["data"] >= start) & (df_src["data"] <= end)].copy()
+    if periodo_sel == "Este ano":
+        start = date(hoje.year, 1, 1)
+        end = hoje
+        return df_src[(df_src["data"] >= start) & (df_src["data"] <= end)].copy()
+
+    # Personalizado / Comparar meses são tratados fora
+    return df_src.copy()
+
+
+def build_funnel_figure(title: str, steps: list[tuple[str, int]], base_color: str) -> go.Figure:
+    """
+    Funil visual (Plotly) com uma sensação "3D" (sombra/contorno) usando Funnel + layout caprichado.
+    """
+    labels = [s[0] for s in steps]
+    values = [int(s[1]) for s in steps]
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Funnel(
+            name=title,
+            y=labels,
+            x=values,
+            textinfo="value+percent initial",
+            textposition="inside",
+            marker=dict(
+                color=base_color,
+                line=dict(color="rgba(0,0,0,0.25)", width=2),
+            ),
+            connector=dict(line=dict(color="rgba(0,0,0,0.2)", width=1)),
+            opacity=0.92,
+        )
+    )
+
+    fig.update_layout(
+        title=dict(text=title, x=0.5, xanchor="center"),
+        margin=dict(l=10, r=10, t=50, b=10),
+        height=420,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(size=14),
+    )
+    return fig
+
+
+def compute_funnel_counts(
+    df_sessions: pd.DataFrame,
+    df_click: pd.DataFrame,
+    df_form_start: pd.DataFrame,
+    df_leads: pd.DataFrame,
+    lead_event_filter_fn,
+    origens_sel,
+    dispositivos_sel,
+) -> tuple[int, int, int, int]:
+    s = apply_common_filters(df_sessions, origens_sel, dispositivos_sel)
+    c = apply_common_filters(df_click, origens_sel, dispositivos_sel)
+    f = apply_common_filters(df_form_start, origens_sel, dispositivos_sel)
+
+    # conversões: linhas na aba leads cujo evento bate
+    leads_base = apply_common_filters(df_leads, origens_sel, dispositivos_sel)
+    if "evento" in leads_base.columns and not leads_base.empty:
+        leads_conv = leads_base[leads_base["evento"].apply(lead_event_filter_fn)].copy()
+    else:
+        leads_conv = leads_base.iloc[0:0].copy()
+
+    return len(s), len(c), len(f), len(leads_conv)
+
+
+# =============================================================================
 # SIDEBAR: FILTROS
-# -----------------------------
+# =============================================================================
 st.sidebar.markdown("## Filtros")
 
-# Carrega dados
-df = load_all_data()
+# Carrega abas necessárias
+dfs = {name: load_sheet(name) for name in SHEETS_REQUIRED}
+df_leads = dfs["leads"]
 
 st.title("📊 Relatório de Leads no Site NextQS")
 
-if df.empty:
-    st.warning("Nenhum dado encontrado na planilha do Google Sheets.")
+if df_leads.empty:
+    st.warning("Nenhum dado encontrado na aba 'leads' do Google Sheets.")
     st.stop()
 
-# Período disponível
+# Período disponível (baseado em leads)
 st.caption(
-    f"Período disponível: {df['data'].min()} até {df['data'].max()} "
-    f"({df['ano'].min()} - {df['ano'].max()})"
+    f"Período disponível (Leads): {df_leads['data'].min()} até {df_leads['data'].max()} "
+    f"({df_leads['ano'].min()} - {df_leads['ano'].max()})"
 )
 
 # Defaults / estado
@@ -284,60 +415,43 @@ PERIODOS = ["Hoje", "Ontem", "Últimos 7 dias", "Este mês", "Este ano", "Person
 st.session_state.setdefault("periodo_sel", "Últimos 7 dias")
 st.session_state.setdefault("periodo_sel_prev", st.session_state["periodo_sel"])
 
-# Rádio (bolinhas)
 periodo_sel = st.sidebar.radio(
     label="",
     options=PERIODOS,
     key="periodo_sel",
 )
 
-# Quando mudar qualquer opção (inclusive entrar em Personalizado/Comparar meses),
-# faz a releitura da planilha (mesmo do botão).
+# quando mudar qualquer opção, recarrega (para refletir dados mais recentes)
 if periodo_sel != st.session_state.get("periodo_sel_prev"):
     st.session_state["periodo_sel_prev"] = periodo_sel
     trigger_sheet_reload()
 
-# -----------------------------
-# APLICAR FILTRO DE PERÍODO
-# -----------------------------
+# =============================================================================
+# APLICAR FILTRO DE PERÍODO (LEADS + FUNIS)
+# =============================================================================
 hoje = get_today_local()
 ontem = hoje - timedelta(days=1)
 
-df_periodo = df.copy()
 compare_mode = False
 
-if periodo_sel == "Hoje":
-    df_periodo = df[df["data"] == hoje].copy()
+# Base leads do período
+df_periodo_leads = get_period_filtered_df(df_leads, periodo_sel, hoje, ontem)
 
-elif periodo_sel == "Ontem":
-    df_periodo = df[df["data"] == ontem].copy()
+# Para funis: também filtramos cada aba pelo período selecionado (exceto comparar/personalizado)
+df_periodo_sessions = get_period_filtered_df(dfs["sessions"], periodo_sel, hoje, ontem)
+df_periodo_click_whatsapp = get_period_filtered_df(dfs["click_whatsapp"], periodo_sel, hoje, ontem)
+df_periodo_click_formulario = get_period_filtered_df(dfs["click_formulario"], periodo_sel, hoje, ontem)
+df_periodo_form_start_whatsapp = get_period_filtered_df(dfs["form_start_whatsapp"], periodo_sel, hoje, ontem)
+df_periodo_form_start_formulario = get_period_filtered_df(dfs["form_start_formulario"], periodo_sel, hoje, ontem)
 
-elif periodo_sel == "Últimos 7 dias":
-    # EXEMPLO do usuário: 12/12 -> 05/12 a 11/12 (exclui hoje)
-    start = hoje - timedelta(days=7)
-    end = ontem
-    df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
-
-elif periodo_sel == "Este mês":
-    start = date(hoje.year, hoje.month, 1)
-    end = ontem
-    df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
-
-elif periodo_sel == "Este ano":
-    start = date(hoje.year, 1, 1)
-    end = hoje
-    df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
-
-elif periodo_sel == "Personalizado":
-    # "setinha": expander
+# Personalizado / Comparar meses: tratado abaixo
+if periodo_sel == "Personalizado":
     with st.sidebar.expander("Personalizado", expanded=True):
-        anos_disponiveis = sorted(df["ano"].unique())
+        anos_disponiveis = sorted(df_leads["ano"].unique())
         ano_default = anos_disponiveis[-1] if anos_disponiveis else hoje.year
 
-        if "custom_ano" not in st.session_state:
-            st.session_state["custom_ano"] = ano_default
-        if "custom_mes_label" not in st.session_state:
-            st.session_state["custom_mes_label"] = "Todo o ano"
+        st.session_state.setdefault("custom_ano", ano_default)
+        st.session_state.setdefault("custom_mes_label", "Todo o ano")
 
         custom_ano = st.selectbox(
             "Ano",
@@ -348,7 +462,7 @@ elif periodo_sel == "Personalizado":
             key="custom_ano",
         )
 
-        meses_disponiveis = sorted(df[df["ano"] == custom_ano]["mes"].unique())
+        meses_disponiveis = sorted(df_leads[df_leads["ano"] == custom_ano]["mes"].unique())
         opcoes_meses = ["Todo o ano"] + [MESES_LABEL[m] for m in meses_disponiveis]
 
         custom_mes_label = st.selectbox(
@@ -362,9 +476,7 @@ elif periodo_sel == "Personalizado":
 
         aplicar = st.button("Aplicar")
 
-    # Só aplica quando clicar "Aplicar"
-    if "custom_aplicado" not in st.session_state:
-        st.session_state["custom_aplicado"] = False
+    st.session_state.setdefault("custom_aplicado", False)
 
     if aplicar:
         st.session_state["custom_aplicado"] = True
@@ -372,25 +484,43 @@ elif periodo_sel == "Personalizado":
 
     if st.session_state.get("custom_aplicado", False):
         if custom_mes_label == "Todo o ano":
-            df_periodo = df[df["ano"] == custom_ano].copy()
+            df_periodo_leads = df_leads[df_leads["ano"] == custom_ano].copy()
+            # mesma regra para abas do funil
+            df_periodo_sessions = dfs["sessions"][dfs["sessions"]["ano"] == custom_ano].copy()
+            df_periodo_click_whatsapp = dfs["click_whatsapp"][dfs["click_whatsapp"]["ano"] == custom_ano].copy()
+            df_periodo_click_formulario = dfs["click_formulario"][dfs["click_formulario"]["ano"] == custom_ano].copy()
+            df_periodo_form_start_whatsapp = dfs["form_start_whatsapp"][dfs["form_start_whatsapp"]["ano"] == custom_ano].copy()
+            df_periodo_form_start_formulario = dfs["form_start_formulario"][dfs["form_start_formulario"]["ano"] == custom_ano].copy()
         else:
             mes_num_sel = month_label_to_num(custom_mes_label)
-            df_periodo = df[(df["ano"] == custom_ano) & (df["mes"] == mes_num_sel)].copy()
+            df_periodo_leads = df_leads[(df_leads["ano"] == custom_ano) & (df_leads["mes"] == mes_num_sel)].copy()
+
+            def ym(df_):
+                if df_.empty:
+                    return df_
+                return df_[(df_["ano"] == custom_ano) & (df_["mes"] == mes_num_sel)].copy()
+
+            df_periodo_sessions = ym(dfs["sessions"])
+            df_periodo_click_whatsapp = ym(dfs["click_whatsapp"])
+            df_periodo_click_formulario = ym(dfs["click_formulario"])
+            df_periodo_form_start_whatsapp = ym(dfs["form_start_whatsapp"])
+            df_periodo_form_start_formulario = ym(dfs["form_start_formulario"])
     else:
-        # Antes do primeiro "Aplicar", mantém o padrão (Últimos 7 dias)
-        start = hoje - timedelta(days=7)
-        end = ontem
-        df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
+        # antes do primeiro aplicar, mantém padrão (Últimos 7 dias)
+        df_periodo_leads = get_period_filtered_df(df_leads, "Últimos 7 dias", hoje, ontem)
+        df_periodo_sessions = get_period_filtered_df(dfs["sessions"], "Últimos 7 dias", hoje, ontem)
+        df_periodo_click_whatsapp = get_period_filtered_df(dfs["click_whatsapp"], "Últimos 7 dias", hoje, ontem)
+        df_periodo_click_formulario = get_period_filtered_df(dfs["click_formulario"], "Últimos 7 dias", hoje, ontem)
+        df_periodo_form_start_whatsapp = get_period_filtered_df(dfs["form_start_whatsapp"], "Últimos 7 dias", hoje, ontem)
+        df_periodo_form_start_formulario = get_period_filtered_df(dfs["form_start_formulario"], "Últimos 7 dias", hoje, ontem)
 
 elif periodo_sel == "Comparar meses":
     compare_mode = True
 
     with st.sidebar.expander("Comparar meses", expanded=True):
-        anos_disponiveis = sorted(df["ano"].unique())
+        anos_disponiveis = sorted(df_leads["ano"].unique())
         ano_default = anos_disponiveis[-1] if anos_disponiveis else hoje.year
-
-        if "compare_ano" not in st.session_state:
-            st.session_state["compare_ano"] = ano_default
+        st.session_state.setdefault("compare_ano", ano_default)
 
         compare_ano = st.selectbox(
             "Ano",
@@ -401,24 +531,19 @@ elif periodo_sel == "Comparar meses":
             key="compare_ano",
         )
 
-        meses_disponiveis = sorted(df[df["ano"] == compare_ano]["mes"].unique())
+        meses_disponiveis = sorted(df_leads[df_leads["ano"] == compare_ano]["mes"].unique())
         if not meses_disponiveis:
             st.warning("Não há meses disponíveis para o ano selecionado.")
             st.stop()
 
         opcoes_meses = [MESES_LABEL[m] for m in meses_disponiveis]
 
-        # Defaults (últimos 2 meses disponíveis)
-        if "compare_mes1_label" not in st.session_state:
-            st.session_state["compare_mes1_label"] = opcoes_meses[-1]
-        if "compare_mes2_label" not in st.session_state:
-            st.session_state["compare_mes2_label"] = opcoes_meses[-2] if len(opcoes_meses) >= 2 else opcoes_meses[-1]
+        st.session_state.setdefault("compare_mes1_label", opcoes_meses[-1])
+        st.session_state.setdefault("compare_mes2_label", opcoes_meses[-2] if len(opcoes_meses) >= 2 else opcoes_meses[-1])
 
-        # Cores fixas (boas para contraste em fundo claro)
         M1_COLOR = "#2563EB"  # azul
         M2_COLOR = "#F97316"  # laranja
 
-        # Mês 1 (label + cor + seletor na mesma linha)
         col_label_1, col_select_1 = st.columns([1, 3])
         with col_label_1:
             st.markdown(
@@ -439,7 +564,6 @@ elif periodo_sel == "Comparar meses":
                 label_visibility="collapsed",
             )
 
-        # Mês 2 (label + cor + seletor na mesma linha)
         col_label_2, col_select_2 = st.columns([1, 3])
         with col_label_2:
             st.markdown(
@@ -462,8 +586,7 @@ elif periodo_sel == "Comparar meses":
 
         aplicar_compare = st.button("Aplicar")
 
-    if "compare_aplicado" not in st.session_state:
-        st.session_state["compare_aplicado"] = False
+    st.session_state.setdefault("compare_aplicado", False)
 
     if aplicar_compare:
         st.session_state["compare_aplicado"] = True
@@ -471,61 +594,113 @@ elif periodo_sel == "Comparar meses":
 
     if not st.session_state.get("compare_aplicado", False):
         # Antes do primeiro "Aplicar", mantém o padrão (Últimos 7 dias)
-        start = hoje - timedelta(days=7)
-        end = ontem
-        df_periodo = df[(df["data"] >= start) & (df["data"] <= end)].copy()
+        df_periodo_leads = get_period_filtered_df(df_leads, "Últimos 7 dias", hoje, ontem)
+        df_periodo_sessions = get_period_filtered_df(dfs["sessions"], "Últimos 7 dias", hoje, ontem)
+        df_periodo_click_whatsapp = get_period_filtered_df(dfs["click_whatsapp"], "Últimos 7 dias", hoje, ontem)
+        df_periodo_click_formulario = get_period_filtered_df(dfs["click_formulario"], "Últimos 7 dias", hoje, ontem)
+        df_periodo_form_start_whatsapp = get_period_filtered_df(dfs["form_start_whatsapp"], "Últimos 7 dias", hoje, ontem)
+        df_periodo_form_start_formulario = get_period_filtered_df(dfs["form_start_formulario"], "Últimos 7 dias", hoje, ontem)
 
 # Proteção para casos sem dados no período (modo normal)
 if not compare_mode:
-    if df_periodo.empty:
+    if df_periodo_leads.empty:
         st.warning("Nenhum Lead encontrado para o período selecionado.")
         st.stop()
 
-    st.caption(
-        f"Período filtrado: {df_periodo['data'].min()} até {df_periodo['data'].max()}"
-    )
+    st.caption(f"Período filtrado: {df_periodo_leads['data'].min()} até {df_periodo_leads['data'].max()}")
 
-# -----------------------------
+# =============================================================================
 # FILTROS EXTRAS (EVENTO / ORIGEM / DISPOSITIVO)
-# -----------------------------
+# =============================================================================
 st.sidebar.header("Filtros adicionais")
 
-# Em modo comparar, os filtros adicionais precisam considerar os 2 meses juntos
 if compare_mode and st.session_state.get("compare_aplicado", False):
     m1_num = month_label_to_num(st.session_state["compare_mes1_label"])
     m2_num = month_label_to_num(st.session_state["compare_mes2_label"])
-    df_m1_base = filter_by_year_month(df, st.session_state["compare_ano"], m1_num)
-    df_m2_base = filter_by_year_month(df, st.session_state["compare_ano"], m2_num)
-    df_union = pd.concat([df_m1_base, df_m2_base], ignore_index=True)
-    df_union = df_union.sort_values("data_hora")
+    df_m1_base = filter_by_year_month(df_leads, st.session_state["compare_ano"], m1_num)
+    df_m2_base = filter_by_year_month(df_leads, st.session_state["compare_ano"], m2_num)
+    df_union = pd.concat([df_m1_base, df_m2_base], ignore_index=True).sort_values("data_hora")
     df_for_filters = df_union
 else:
-    df_for_filters = df_periodo
+    df_for_filters = df_periodo_leads
 
-eventos = sorted(df_for_filters["evento"].dropna().unique().tolist())
-eventos_sel = st.sidebar.multiselect(
-    "Tipo de evento", options=eventos, default=eventos
-)
+eventos = sorted(df_for_filters["evento"].dropna().unique().tolist()) if "evento" in df_for_filters.columns else []
+eventos_sel = st.sidebar.multiselect("Tipo de evento", options=eventos, default=eventos)
 
-origens = sorted(df_for_filters["origem"].dropna().unique().tolist())
-origens_sel = st.sidebar.multiselect(
-    "Origem", options=origens, default=origens
-)
+origens = sorted(df_for_filters["origem"].dropna().unique().tolist()) if "origem" in df_for_filters.columns else []
+origens_sel = st.sidebar.multiselect("Origem", options=origens, default=origens)
 
-dispositivos = sorted(df_for_filters["dispositivo"].dropna().unique().tolist())
-dispositivos_sel = st.sidebar.multiselect(
-    "Dispositivo", options=dispositivos, default=dispositivos
-)
+dispositivos = sorted(df_for_filters["dispositivo"].dropna().unique().tolist()) if "dispositivo" in df_for_filters.columns else []
+dispositivos_sel = st.sidebar.multiselect("Dispositivo", options=dispositivos, default=dispositivos)
 
-# -----------------------------
-# CONSTRUÇÃO DO DATASET FINAL (NORMAL x COMPARAR)
-# -----------------------------
+# =============================================================================
+# DASH
+# =============================================================================
 GREEN_COLOR = "#22c55e"
 
+def render_funnels_section(
+    df_sessions_base: pd.DataFrame,
+    df_click_whatsapp_base: pd.DataFrame,
+    df_form_start_whatsapp_base: pd.DataFrame,
+    df_click_formulario_base: pd.DataFrame,
+    df_form_start_formulario_base: pd.DataFrame,
+    df_leads_base: pd.DataFrame,
+    origens_sel,
+    dispositivos_sel,
+):
+    st.subheader("Funis (Sessões → Conversões)")
+
+    # WhatsApp
+    w_sessions, w_clicks, w_starts, w_convs = compute_funnel_counts(
+        df_sessions_base,
+        df_click_whatsapp_base,
+        df_form_start_whatsapp_base,
+        df_leads_base,
+        is_whatsapp_event,
+        origens_sel,
+        dispositivos_sel,
+    )
+
+    # Formulário
+    f_sessions, f_clicks, f_starts, f_convs = compute_funnel_counts(
+        df_sessions_base,
+        df_click_formulario_base,
+        df_form_start_formulario_base,
+        df_leads_base,
+        is_form_event,
+        origens_sel,
+        dispositivos_sel,
+    )
+
+    col_w, col_f = st.columns(2)
+
+    with col_w:
+        steps_w = [
+            ("Sessões", w_sessions),
+            ("Cliques no botão", w_clicks),
+            ("Começaram a preencher", w_starts),
+            ("Converteram", w_convs),
+        ]
+        fig_w = build_funnel_figure("WhatsApp", steps_w, base_color="#8b5cf6")
+        st.plotly_chart(fig_w, use_container_width=True)
+
+    with col_f:
+        steps_f = [
+            ("Sessões", f_sessions),
+            ("Cliques no botão", f_clicks),
+            ("Começaram a preencher", f_starts),
+            ("Converteram", f_convs),
+        ]
+        fig_f = build_funnel_figure("Formulário", steps_f, base_color="#a78bfa")
+        st.plotly_chart(fig_f, use_container_width=True)
+
+    st.caption("Obs.: cada linha em cada aba conta como 1 etapa (sessão/clique/início/conversão).")
+
+
 if compare_mode and st.session_state.get("compare_aplicado", False):
-    # Cores fixas (mantém igual ao sidebar)
-    M1_COLOR = "#2563EB"  # azul
-    M2_COLOR = "#F97316"  # laranja
+    # Cores fixas
+    M1_COLOR = "#2563EB"
+    M2_COLOR = "#F97316"
 
     ano_sel = int(st.session_state["compare_ano"])
     m1_label = st.session_state["compare_mes1_label"]
@@ -533,37 +708,34 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
     m1_num = month_label_to_num(m1_label)
     m2_num = month_label_to_num(m2_label)
 
-    df_m1 = apply_extra_filters(df_m1_base, eventos_sel, origens_sel, dispositivos_sel)
-    df_m2 = apply_extra_filters(df_m2_base, eventos_sel, origens_sel, dispositivos_sel)
+    # Leads por mês (base)
+    df_m1_leads_base = filter_by_year_month(df_leads, ano_sel, m1_num)
+    df_m2_leads_base = filter_by_year_month(df_leads, ano_sel, m2_num)
+
+    # Aplica filtros extras nos leads (inclui evento)
+    df_m1 = apply_extra_filters_leads(df_m1_leads_base, eventos_sel, origens_sel, dispositivos_sel)
+    df_m2 = apply_extra_filters_leads(df_m2_leads_base, eventos_sel, origens_sel, dispositivos_sel)
 
     if df_m1.empty and df_m2.empty:
         st.warning("Nenhum Lead encontrado para os meses selecionados (após filtros).")
         st.stop()
 
-    # Cabeçalho de período (comparação)
     min1, max1 = (df_m1["data"].min(), df_m1["data"].max()) if not df_m1.empty else ("-", "-")
     min2, max2 = (df_m2["data"].min(), df_m2["data"].max()) if not df_m2.empty else ("-", "-")
     st.caption(
         f"Comparação: {m1_label}/{ano_sel} ({min1} a {max1})  vs  {m2_label}/{ano_sel} ({min2} a {max2})"
     )
 
-    # -----------------------------
-    # KPIs (comparação)
-    # -----------------------------
     conv_total_1, usuarios_unicos_1, origem_top_1, disp_top_1, pct_top_1 = get_kpis(df_m1)
     conv_total_2, usuarios_unicos_2, origem_top_2, disp_top_2, pct_top_2 = get_kpis(df_m2)
 
     col1, col2, col3, col4 = st.columns([1, 1, 2, 1])
-
     with col1:
         render_kpi_dual("Leads no período", f"{conv_total_1}", f"{conv_total_2}", M1_COLOR, M2_COLOR)
-
     with col2:
         render_kpi_dual("Leads únicos", f"{usuarios_unicos_1}", f"{usuarios_unicos_2}", M1_COLOR, M2_COLOR)
-
     with col3:
         render_kpi_dual("Origem mais comum", f"{origem_top_1}", f"{origem_top_2}", M1_COLOR, M2_COLOR)
-
     with col4:
         st.text("Dispositivo (%)")
         st.markdown(
@@ -574,9 +746,42 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
 
     st.markdown("---")
 
-    # -----------------------------
+    # Funis: em tabs por mês, sempre usando leads do mês (MAS ignorando filtro de evento para conversão)
+    st.markdown("### Funis (por mês)")
+    tab_f1, tab_f2 = st.tabs([f"{m1_label}/{ano_sel}", f"{m2_label}/{ano_sel}"])
+
+    def ym(df_, mes_num):
+        if df_.empty:
+            return df_
+        return df_[(df_["ano"] == ano_sel) & (df_["mes"] == mes_num)].copy()
+
+    with tab_f1:
+        render_funnels_section(
+            ym(dfs["sessions"], m1_num),
+            ym(dfs["click_whatsapp"], m1_num),
+            ym(dfs["form_start_whatsapp"], m1_num),
+            ym(dfs["click_formulario"], m1_num),
+            ym(dfs["form_start_formulario"], m1_num),
+            df_m1_leads_base,  # base (sem filtro de evento)
+            origens_sel,
+            dispositivos_sel,
+        )
+
+    with tab_f2:
+        render_funnels_section(
+            ym(dfs["sessions"], m2_num),
+            ym(dfs["click_whatsapp"], m2_num),
+            ym(dfs["form_start_whatsapp"], m2_num),
+            ym(dfs["click_formulario"], m2_num),
+            ym(dfs["form_start_formulario"], m2_num),
+            df_m2_leads_base,  # base (sem filtro de evento)
+            origens_sel,
+            dispositivos_sel,
+        )
+
+    st.markdown("---")
+
     # GRÁFICO: LEADS POR DIA ou POR HORA (2 LINHAS)
-    # -----------------------------
     if periodo_sel in ["Hoje", "Ontem"]:
         st.subheader("Leads por Hora")
 
@@ -635,9 +840,7 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
         fig.update_layout(xaxis_title="Data", yaxis_title="Leads")
         st.plotly_chart(fig, use_container_width=True)
 
-    # -----------------------------
     # LINHA 2: ORIGEM x EVENTO (COMPARAÇÃO)
-    # -----------------------------
     col_g1, col_g2 = st.columns(2)
 
     with col_g1:
@@ -648,24 +851,21 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
         o2 = df_m2.groupby("origem").size().reset_index(name="leads")
         o2["mes"] = f"{m2_label}/{ano_sel}"
 
-        conv_origem = pd.concat([o1, o2], ignore_index=True)
-        conv_origem = conv_origem.sort_values("leads", ascending=False)
+        conv_origem = pd.concat([o1, o2], ignore_index=True).sort_values("leads", ascending=False)
 
-        fig_origem = px.bar(conv_origem, x="origem", y="leads", color="mes", barmode="group",
-                            color_discrete_map={f"{m1_label}/{ano_sel}": M1_COLOR, f"{m2_label}/{ano_sel}": M2_COLOR})
+        fig_origem = px.bar(
+            conv_origem,
+            x="origem",
+            y="leads",
+            color="mes",
+            barmode="group",
+            color_discrete_map={f"{m1_label}/{ano_sel}": M1_COLOR, f"{m2_label}/{ano_sel}": M2_COLOR},
+        )
         fig_origem.update_layout(xaxis_title="Origem", yaxis_title="Leads", legend_title_text="")
         st.plotly_chart(fig_origem, use_container_width=True)
 
     with col_g2:
         st.subheader("Leads por Evento")
-
-        def label_evento(v):
-            v_str = str(v).strip().lower()
-            if "whats" in v_str:
-                return "WhatsApp"
-            if "form" in v_str:
-                return "Formulário"
-            return str(v).title()
 
         e1 = df_m1.groupby("evento").size().reset_index(name="leads")
         e1["evento_legenda"] = e1["evento"].apply(label_evento)
@@ -677,14 +877,18 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
 
         conv_evento = pd.concat([e1, e2], ignore_index=True)
 
-        fig_evento = px.bar(conv_evento, x="evento_legenda", y="leads", color="mes", barmode="group",
-                            color_discrete_map={f"{m1_label}/{ano_sel}": M1_COLOR, f"{m2_label}/{ano_sel}": M2_COLOR})
+        fig_evento = px.bar(
+            conv_evento,
+            x="evento_legenda",
+            y="leads",
+            color="mes",
+            barmode="group",
+            color_discrete_map={f"{m1_label}/{ano_sel}": M1_COLOR, f"{m2_label}/{ano_sel}": M2_COLOR},
+        )
         fig_evento.update_layout(xaxis_title="Evento", yaxis_title="Leads", legend_title_text="")
         st.plotly_chart(fig_evento, use_container_width=True)
 
-    # -----------------------------
     # RANKING: CAMPANHAS + PALAVRAS-CHAVE (LISTAS) - COMPARAÇÃO
-    # -----------------------------
     col_rank1, col_rank2 = st.columns(2)
 
     with col_rank1:
@@ -739,9 +943,7 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
         else:
             st.dataframe(ranking_terms, use_container_width=True, height=400)
 
-    # -----------------------------
     # LINHA 3: DISPOSITIVO x HORA (COMPARAÇÃO)
-    # -----------------------------
     col_g3, col_g4 = st.columns(2)
 
     with col_g3:
@@ -753,8 +955,14 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
         d2["mes"] = f"{m2_label}/{ano_sel}"
 
         conv_disp = pd.concat([d1, d2], ignore_index=True)
-        fig_disp = px.bar(conv_disp, x="dispositivo", y="leads", color="mes", barmode="group",
-                          color_discrete_map={f"{m1_label}/{ano_sel}": M1_COLOR, f"{m2_label}/{ano_sel}": M2_COLOR})
+        fig_disp = px.bar(
+            conv_disp,
+            x="dispositivo",
+            y="leads",
+            color="mes",
+            barmode="group",
+            color_discrete_map={f"{m1_label}/{ano_sel}": M1_COLOR, f"{m2_label}/{ano_sel}": M2_COLOR},
+        )
         fig_disp.update_layout(xaxis_title="Dispositivo", yaxis_title="Leads", legend_title_text="")
         st.plotly_chart(fig_disp, use_container_width=True)
 
@@ -766,17 +974,20 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
         h2 = df_m2.groupby("hora").size().reset_index(name="leads")
         h2["mes"] = f"{m2_label}/{ano_sel}"
 
-        conv_hora = pd.concat([h1, h2], ignore_index=True)
-        conv_hora = conv_hora.sort_values("hora")
+        conv_hora = pd.concat([h1, h2], ignore_index=True).sort_values("hora")
 
-        fig_hora = px.bar(conv_hora, x="hora", y="leads", color="mes", barmode="group",
-                          color_discrete_map={f"{m1_label}/{ano_sel}": M1_COLOR, f"{m2_label}/{ano_sel}": M2_COLOR})
+        fig_hora = px.bar(
+            conv_hora,
+            x="hora",
+            y="leads",
+            color="mes",
+            barmode="group",
+            color_discrete_map={f"{m1_label}/{ano_sel}": M1_COLOR, f"{m2_label}/{ano_sel}": M2_COLOR},
+        )
         fig_hora.update_layout(xaxis_title="Hora do dia", yaxis_title="Leads", legend_title_text="")
         st.plotly_chart(fig_hora, use_container_width=True)
 
-    # -----------------------------
     # TABELA DETALHADA (COMPARAÇÃO)
-    # -----------------------------
     st.markdown("---")
     st.subheader("Dados detalhados (após filtros)")
 
@@ -784,94 +995,71 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
 
     with tab1:
         st.dataframe(
-            df_m1[
-                [
-                    "data_hora",
-                    "evento",
-                    "dispositivo",
-                    "origem",
-                    "user_id_email",
-                    "ip_address",
-                ]
-            ],
+            df_m1[["data_hora", "evento", "dispositivo", "origem", "user_id_email", "ip_address"]],
             use_container_width=True,
         )
 
     with tab2:
         st.dataframe(
-            df_m2[
-                [
-                    "data_hora",
-                    "evento",
-                    "dispositivo",
-                    "origem",
-                    "user_id_email",
-                    "ip_address",
-                ]
-            ],
+            df_m2[["data_hora", "evento", "dispositivo", "origem", "user_id_email", "ip_address"]],
             use_container_width=True,
         )
 
 else:
-    # -----------------------------
+    # =============================================================================
     # MODO NORMAL (SEM COMPARAÇÃO)
-    # -----------------------------
-    df_filtrado = apply_extra_filters(df_periodo, eventos_sel, origens_sel, dispositivos_sel)
+    # =============================================================================
+    df_filtrado = apply_extra_filters_leads(df_periodo_leads, eventos_sel, origens_sel, dispositivos_sel)
 
     if df_filtrado.empty:
         st.warning("Nenhum Lead encontrado para o período selecionado (após filtros).")
         st.stop()
 
-    # -----------------------------
     # KPIs
-    # -----------------------------
     conv_total, usuarios_unicos, origem_top, dispositivo_top, pct_top = get_kpis(df_filtrado)
 
-    # KPIs em colunas com a coluna 3 mais larga
     col1, col2, col3, col4 = st.columns([1, 1, 2, 1])
-
     with col1:
         render_kpi_single("Leads no período", f"{conv_total}", GREEN_COLOR)
-
     with col2:
         render_kpi_single("Leads únicos", f"{usuarios_unicos}", GREEN_COLOR)
-
     with col3:
         render_kpi_single("Origem mais comum", f"{origem_top}", GREEN_COLOR)
-
     with col4:
         st.text(f"{dispositivo_top} (%)")
-        st.markdown(
-            kpi_value_html(f"{pct_top:.1f}%", GREEN_COLOR),
-            unsafe_allow_html=True,
-        )
+        st.markdown(kpi_value_html(f"{pct_top:.1f}%", GREEN_COLOR), unsafe_allow_html=True)
 
     st.markdown("---")
 
-    # -----------------------------
+    # FUNIS (ignorando filtro de evento — só respeita Origem/Dispositivo e Período)
+    render_funnels_section(
+        df_periodo_sessions,
+        df_periodo_click_whatsapp,
+        df_periodo_form_start_whatsapp,
+        df_periodo_click_formulario,
+        df_periodo_form_start_formulario,
+        df_periodo_leads,  # base sem filtro de evento (mas com período)
+        origens_sel,
+        dispositivos_sel,
+    )
+
+    st.markdown("---")
+
     # GRÁFICO: LEADS POR DIA ou POR HORA (quando Hoje/Ontem)
-    # -----------------------------
     if periodo_sel in ["Hoje", "Ontem"]:
         st.subheader("Leads por Hora")
-
-        conv_por_hora_dia = df_filtrado.groupby("hora").size().reset_index(name="leads")
-        conv_por_hora_dia = conv_por_hora_dia.sort_values("hora")
-
+        conv_por_hora_dia = df_filtrado.groupby("hora").size().reset_index(name="leads").sort_values("hora")
         fig_hora_dia = px.bar(conv_por_hora_dia, x="hora", y="leads")
         fig_hora_dia.update_layout(xaxis_title="Hora do dia", yaxis_title="Leads", xaxis=dict(dtick=1))
         st.plotly_chart(fig_hora_dia, use_container_width=True)
-
     else:
         st.subheader("Leads por Dia")
-
         conv_por_dia = df_filtrado.groupby("data").size().reset_index(name="leads")
         fig_dia = px.line(conv_por_dia, x="data", y="leads")
         fig_dia.update_layout(xaxis_title="Data", yaxis_title="Leads")
         st.plotly_chart(fig_dia, use_container_width=True)
 
-    # -----------------------------
     # RANKING DE MESES (APENAS QUANDO O PERÍODO FILTRADO FOR "ANO INTEIRO")
-    # -----------------------------
     show_ranking_meses = False
     if periodo_sel == "Personalizado":
         if st.session_state.get("custom_aplicado", False) and st.session_state.get("custom_mes_label") == "Todo o ano":
@@ -882,59 +1070,30 @@ else:
 
     if show_ranking_meses:
         st.subheader("Ordem dos Meses com mais Conversões (Leads únicos)")
-
-        ranking_meses = (
-            df_filtrado
-            .groupby("mes")["user_id_email"]
-            .nunique()
-            .reset_index(name="leads_unicos")
-        )
+        ranking_meses = df_filtrado.groupby("mes")["user_id_email"].nunique().reset_index(name="leads_unicos")
 
         if ranking_meses.empty:
             st.info("Nenhuma informação de leads únicos para montar o ranking de meses.")
         else:
             ranking_meses["mes_nome"] = ranking_meses["mes"].map(MESES_LABEL)
             ranking_meses = ranking_meses.sort_values("leads_unicos", ascending=False)
-
-            fig_meses = px.bar(
-                ranking_meses,
-                x="mes_nome",
-                y="leads_unicos",
-            )
-            fig_meses.update_layout(
-                xaxis_title="Mês",
-                yaxis_title="Leads únicos",
-            )
+            fig_meses = px.bar(ranking_meses, x="mes_nome", y="leads_unicos")
+            fig_meses.update_layout(xaxis_title="Mês", yaxis_title="Leads únicos")
             st.plotly_chart(fig_meses, use_container_width=True)
 
-    # -----------------------------
     # LINHA 2: ORIGEM x EVENTO
-    # -----------------------------
     col_g1, col_g2 = st.columns(2)
 
     with col_g1:
         st.subheader("Leads por Origem")
-        conv_por_origem = (
-            df_filtrado.groupby("origem").size().reset_index(name="leads")
-        )
-        conv_por_origem = conv_por_origem.sort_values("leads", ascending=False)
+        conv_por_origem = df_filtrado.groupby("origem").size().reset_index(name="leads").sort_values("leads", ascending=False)
         fig_origem = px.bar(conv_por_origem, x="origem", y="leads")
         fig_origem.update_layout(xaxis_title="Origem", yaxis_title="Leads")
         st.plotly_chart(fig_origem, use_container_width=True)
 
     with col_g2:
         st.subheader("Leads por Evento")
-
         conv_por_evento = df_filtrado.groupby("evento").size().reset_index(name="leads")
-
-        def label_evento(v):
-            v_str = str(v).strip().lower()
-            if "whats" in v_str:
-                return "WhatsApp"
-            if "form" in v_str:
-                return "Formulário"
-            return str(v).title()
-
         conv_por_evento["evento_legenda"] = conv_por_evento["evento"].apply(label_evento)
 
         fig_evento = px.bar(
@@ -942,22 +1101,16 @@ else:
             x="evento_legenda",
             y="leads",
             color="evento_legenda",
-            color_discrete_map={
-                "WhatsApp": "#25D366",
-                "Formulário": "#FFA726",
-            },
+            color_discrete_map={"WhatsApp": "#25D366", "Formulário": "#FFA726"},
         )
         fig_evento.update_layout(xaxis_title="Evento", yaxis_title="Leads", showlegend=False)
         st.plotly_chart(fig_evento, use_container_width=True)
 
-    # -----------------------------
     # RANKING: CAMPANHAS + PALAVRAS-CHAVE (LISTAS)
-    # -----------------------------
     col_rank1, col_rank2 = st.columns(2)
 
     with col_rank1:
         st.markdown("### Campanhas")
-
         df_campanhas = df_filtrado[df_filtrado["utm_campaign"] != "Campanha não identificada"]
 
         if not df_campanhas.empty:
@@ -966,15 +1119,14 @@ else:
                 .size()
                 .reset_index(name="Conversões")
                 .sort_values("Conversões", ascending=False)
+                .rename(columns={"utm_campaign": "Campanha"})
             )
-            ranking_campanhas = ranking_campanhas.rename(columns={"utm_campaign": "Campanha"})
             st.dataframe(ranking_campanhas, use_container_width=True, height=400)
         else:
             st.info("Nenhuma campanha válida encontrada no período.")
 
     with col_rank2:
         st.markdown("### Termos de Pesquisa")
-
         df_terms = df_filtrado[df_filtrado["utm_term"] != "Palavra-chave não identificada"]
 
         if not df_terms.empty:
@@ -983,51 +1135,33 @@ else:
                 .size()
                 .reset_index(name="Conversões")
                 .sort_values("Conversões", ascending=False)
+                .rename(columns={"utm_term": "Palavra-Chave"})
             )
-            ranking_terms = ranking_terms.rename(columns={"utm_term": "Palavra-Chave"})
             st.dataframe(ranking_terms, use_container_width=True, height=400)
         else:
             st.info("Nenhuma palavra-chave válida encontrada no período.")
 
-    # -----------------------------
     # LINHA 3: DISPOSITIVO x HORA
-    # -----------------------------
     col_g3, col_g4 = st.columns(2)
 
     with col_g3:
         st.subheader("Leads por Dispositivo")
-        conv_por_disp = (
-            df_filtrado.groupby("dispositivo").size().reset_index(name="leads")
-        )
-        conv_por_disp = conv_por_disp.sort_values("leads", ascending=False)
+        conv_por_disp = df_filtrado.groupby("dispositivo").size().reset_index(name="leads").sort_values("leads", ascending=False)
         fig_disp = px.bar(conv_por_disp, x="dispositivo", y="leads")
         fig_disp.update_layout(xaxis_title="Dispositivo", yaxis_title="Leads")
         st.plotly_chart(fig_disp, use_container_width=True)
 
     with col_g4:
         st.subheader("Horário das Leads")
-        conv_por_hora = df_filtrado.groupby("hora").size().reset_index(name="leads")
-        conv_por_hora = conv_por_hora.sort_values("hora")
+        conv_por_hora = df_filtrado.groupby("hora").size().reset_index(name="leads").sort_values("hora")
         fig_hora = px.bar(conv_por_hora, x="hora", y="leads")
         fig_hora.update_layout(xaxis_title="Hora do dia", yaxis_title="Leads")
         st.plotly_chart(fig_hora, use_container_width=True)
 
-    # -----------------------------
     # TABELA DETALHADA
-    # -----------------------------
     st.markdown("---")
     st.subheader("Dados detalhados (após filtros)")
-
     st.dataframe(
-        df_filtrado[
-            [
-                "data_hora",
-                "evento",
-                "dispositivo",
-                "origem",
-                "user_id_email",
-                "ip_address",
-            ]
-        ],
+        df_filtrado[["data_hora", "evento", "dispositivo", "origem", "user_id_email", "ip_address"]],
         use_container_width=True,
     )
