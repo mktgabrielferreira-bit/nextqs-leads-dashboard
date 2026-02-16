@@ -332,34 +332,65 @@ def get_period_filtered_df(df_src: pd.DataFrame, periodo_sel: str, hoje: date, o
 def build_funnel_figure(title: str, steps: list[tuple[str, int]], base_color: str, min_ratio: float = 0.18) -> go.Figure:
     """
     Funil visual (Plotly) com uma sensação "3D" (sombra/contorno).
-    Para evitar que etapas com valores baixos fiquem "finas demais",
-    usamos uma escala visual com largura mínima (min_ratio), mas exibimos
-    os números reais no texto.
+
+    Importante: usamos uma escala visual com largura mínima (min_ratio) para
+    manter as etapas pequenas visíveis, MAS os percentuais exibidos são sempre
+    calculados a partir dos valores reais (e não da largura visual).
     """
     labels = [s[0] for s in steps]
     values_real = [max(0, int(s[1])) for s in steps]
 
-    # escala visual com largura mínima (sem aumentar visualmente acima do degrau anterior)
+    # -------------------------------------------------------------------------
+    # 1) Escala visual (apenas para desenho)
+    # -------------------------------------------------------------------------
     maxv = max(values_real) if values_real else 1
     minv = max(1, int(round(maxv * float(min_ratio))))
+
     scaled = []
-    prev = maxv
+    prev_scaled = maxv
     for v in values_real:
+        # garante uma largura mínima, mas nunca "aumenta" depois que afunila
         target = max(v, minv)
-        sv = min(prev, target)
+        sv = min(prev_scaled, target)
         scaled.append(sv)
-        prev = sv
+        prev_scaled = sv
+
+    # -------------------------------------------------------------------------
+    # 2) Percentuais reais (para texto e tooltip)
+    # -------------------------------------------------------------------------
+    pct_initial = [(v / maxv) if maxv else 0.0 for v in values_real]
+
+    pct_prev = []
+    prev_real = None
+    for v in values_real:
+        if prev_real in (None, 0):
+            pct_prev.append(1.0 if v else 0.0)
+        else:
+            pct_prev.append(v / prev_real)
+        prev_real = v
+
+    # Texto dentro do funil (compacto)
+    text_inside = [f"{v}<br>{p:.1%}" for v, p in zip(values_real, pct_initial)]
+
+    customdata = [[v, p_i, p_p] for v, p_i, p_p in zip(values_real, pct_initial, pct_prev)]
 
     fig = go.Figure()
     fig.add_trace(
         go.Funnel(
             name=title,
             y=labels,
-            x=scaled,  # largura visual
-            customdata=values_real,  # números reais
-            texttemplate="%{customdata}<br>%{percentInitial:.0%}",
+            x=scaled,                 # largura visual
+            text=text_inside,         # exibição (usa valores reais)
+            customdata=customdata,    # para tooltip (valores reais)
+            texttemplate="%{text}",
             textposition="inside",
-            hovertemplate="<b>%{y}</b><br>Quantidade: %{customdata}<br>%{percentInitial:.1%} do início<extra></extra>",
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Quantidade: %{customdata[0]}<br>"
+                "% do início: %{customdata[1]:.1%}<br>"
+                "% do passo anterior: %{customdata[2]:.1%}"
+                "<extra></extra>"
+            ),
             marker=dict(
                 color=base_color,
                 line=dict(color="rgba(0,0,0,0.28)", width=2),
@@ -376,6 +407,7 @@ def build_funnel_figure(title: str, steps: list[tuple[str, int]], base_color: st
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(size=14),
+        uniformtext=dict(minsize=10, mode="hide"),  # evita texto ilegível em etapas pequenas
     )
     return fig
 
