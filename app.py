@@ -179,11 +179,11 @@ def is_form_event(v) -> bool:
 # =============================================================================
 # CARREGAR DADOS DO GOOGLE SHEETS (PRIVADO)
 # =============================================================================
-SPREADSHEET_ID = "1M_yYBJxtwbzdleT2VDNcQfe0lSXxDX0hNe7bGm7xKUQ"
+SPREADSHEET_ID = "1dw5ssrZu9UfzymB7GLs0rqZf0LggvKAnC5Tek3go1cM"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
 SHEETS_REQUIRED = [
-    "leads",
+    "leads_site",
     "sessions",
     "click_whatsapp",
     "click_formulario",
@@ -424,7 +424,7 @@ def compute_funnel_counts(
     c = apply_common_filters(df_click, origens_sel, dispositivos_sel)
     f = apply_common_filters(df_form_start, origens_sel, dispositivos_sel)
 
-    # conversões: linhas na aba leads cujo evento bate
+    # conversões: linhas na aba leads_site cujo evento bate
     leads_base = apply_common_filters(df_leads, origens_sel, dispositivos_sel)
     if "evento" in leads_base.columns and not leads_base.empty:
         leads_conv = leads_base[leads_base["evento"].apply(lead_event_filter_fn)].copy()
@@ -441,12 +441,12 @@ st.sidebar.markdown("## Filtros")
 
 # Carrega abas necessárias
 dfs = {name: load_sheet(name) for name in SHEETS_REQUIRED}
-df_leads = dfs["leads"]
+df_leads = dfs["leads_site"]
 
 st.title("📊 Relatório de Leads no Site NextQS")
 
 if df_leads.empty:
-    st.warning("Nenhum dado encontrado na aba 'leads' do Google Sheets.")
+    st.warning("Nenhum dado encontrado na aba 'leads_site' do Google Sheets.")
     st.stop()
 
 # Período disponível (baseado em leads)
