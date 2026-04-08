@@ -180,7 +180,11 @@ def is_form_event(v) -> bool:
 # CARREGAR DADOS DO GOOGLE SHEETS (PRIVADO)
 # =============================================================================
 SPREADSHEET_ID = "1dw5ssrZu9UfzymB7GLs0rqZf0LggvKAnC5Tek3go1cM"
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SMARK_SPREADSHEET_ID = "1A0NOLONDkDwb8wBSumHlj0KMqsuKt5CA"
+SMARK_WORKSHEET_GID = 841055934
+SMARK_EMAIL_COLUMN = "E-mail Contato"
+BASE_SYNC_COLUMN = "teste"
 
 SHEETS_REQUIRED = [
     "leads_site",
@@ -198,6 +202,103 @@ def _get_creds():
         service_info = dict(st.secrets["gcp_service_account"])
         return Credentials.from_service_account_info(service_info, scopes=SCOPES)
     return Credentials.from_service_account_file("credenciais_sheets.json", scopes=SCOPES)
+
+
+def normalize_email(value):
+    if pd.isna(value):
+        return None
+    text = str(value).strip().lower()
+    if text in ["", "none", "null", "nan", "undefined"]:
+        return None
+    return text
+
+
+def get_worksheet_by_gid(spreadsheet, gid: int):
+    for ws in spreadsheet.worksheets():
+        if getattr(ws, "id", None) == gid:
+            return ws
+    raise ValueError(f"Não foi possível localizar a aba com gid={gid} na planilha do SMARK.")
+
+
+def ensure_column_exists(ws, column_name: str) -> int:
+    headers = ws.row_values(1)
+    if column_name in headers:
+        return headers.index(column_name) + 1
+
+    new_col_idx = len(headers) + 1
+    ws.update_cell(1, new_col_idx, column_name)
+    return new_col_idx
+
+
+def sync_with_smark() -> dict:
+    creds = _get_creds()
+    client = gspread.authorize(creds)
+
+    base_spreadsheet = client.open_by_key(SPREADSHEET_ID)
+    base_ws = base_spreadsheet.worksheet("leads_site")
+
+    smark_spreadsheet = client.open_by_key(SMARK_SPREADSHEET_ID)
+    smark_ws = get_worksheet_by_gid(smark_spreadsheet, SMARK_WORKSHEET_GID)
+
+    base_records = base_ws.get_all_records()
+    smark_records = smark_ws.get_all_records()
+
+    if not base_records:
+        return {"matched": 0, "updated": 0, "already": 0, "base_rows": 0, "smark_rows": len(smark_records)}
+
+    df_base = pd.DataFrame(base_records)
+    df_smark = pd.DataFrame(smark_records)
+
+    if df_smark.empty:
+        return {"matched": 0, "updated": 0, "already": 0, "base_rows": len(df_base), "smark_rows": 0}
+
+    base_email_col = "email" if "email" in df_base.columns else "user_id_email" if "user_id_email" in df_base.columns else None
+    if base_email_col is None:
+        raise ValueError("A planilha base precisa ter a coluna 'email' ou 'user_id_email'.")
+
+    if SMARK_EMAIL_COLUMN not in df_smark.columns:
+        raise ValueError(f"A planilha do SMARK precisa ter a coluna '{SMARK_EMAIL_COLUMN}'.")
+
+    if BASE_SYNC_COLUMN not in df_base.columns:
+        df_base[BASE_SYNC_COLUMN] = ""
+
+    ensure_column_exists(base_ws, BASE_SYNC_COLUMN)
+
+    smark_emails = {e for e in df_smark[SMARK_EMAIL_COLUMN].map(normalize_email).dropna().tolist()}
+
+    headers = base_ws.row_values(1)
+    target_col_idx = headers.index(BASE_SYNC_COLUMN) + 1
+
+    updates = []
+    matched = 0
+    already = 0
+
+    for row_number, row in enumerate(base_records, start=2):
+        email_norm = normalize_email(row.get(base_email_col))
+        if not email_norm or email_norm not in smark_emails:
+            continue
+
+        matched += 1
+        current_value = str(row.get(BASE_SYNC_COLUMN, "") or "").strip().upper()
+        if current_value == "SIM":
+            already += 1
+            continue
+
+        a1_ref = gspread.utils.rowcol_to_a1(row_number, target_col_idx)
+        updates.append({"range": a1_ref, "values": [["SIM"]]})
+
+    if updates:
+        base_ws.batch_update(updates, value_input_option="USER_ENTERED")
+
+    return {
+        "matched": matched,
+        "updated": len(updates),
+        "already": already,
+        "base_rows": len(df_base),
+        "smark_rows": len(df_smark),
+        "base_email_col": base_email_col,
+        "worksheet_smark": smark_ws.title,
+    }
 
 
 def _parse_datetime_series(s: pd.Series) -> pd.Series:
@@ -437,6 +538,27 @@ def compute_funnel_counts(
 # =============================================================================
 # SIDEBAR: FILTROS
 # =============================================================================
+sync_col_1, sync_col_2 = st.sidebar.columns([1, 1])
+with sync_col_1:
+    sync_clicked = st.button("Sincronizar com SMARK", use_container_width=True)
+with sync_col_2:
+    refresh_clicked = st.button("Atualizar dados", use_container_width=True)
+
+if refresh_clicked:
+    trigger_sheet_reload()
+
+if sync_clicked:
+    with st.spinner("Sincronizando planilha base com a planilha do SMARK..."):
+        try:
+            sync_result = sync_with_smark()
+            load_sheet.clear()
+            st.sidebar.success(
+                f"Sincronização concluída. {sync_result['updated']} linha(s) atualizada(s), "
+                f"{sync_result['already']} já estavam como SIM e {sync_result['matched']} match(es) encontrados."
+            )
+        except Exception as e:
+            st.sidebar.error(f"Erro na sincronização com SMARK: {e}")
+
 st.sidebar.markdown("## Filtros")
 
 # Carrega abas necessárias
