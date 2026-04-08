@@ -181,7 +181,7 @@ def is_form_event(v) -> bool:
 # =============================================================================
 SPREADSHEET_ID = "1dw5ssrZu9UfzymB7GLs0rqZf0LggvKAnC5Tek3go1cM"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-SMARK_SPREADSHEET_ID = "1A0NOLONDkDwb8wBSumHlj0KMqsuKt5CA"
+SMARK_SPREADSHEET_ID = "1sYMJcxzmDQ1r-KPAZ38TNlrQeg7NQMrk-Yk26pyzMBg"
 SMARK_WORKSHEET_GID = 841055934
 SMARK_EMAIL_COLUMN = "E-mail Contato"
 BASE_SYNC_COLUMN = "teste"
