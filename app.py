@@ -270,6 +270,23 @@ def format_date_br_from_any(value) -> str:
     return text
 
 
+def format_smark_swapped_date_to_br(value) -> str:
+    text = normalize_text(value)
+    if not text:
+        return ""
+
+    match = re.match(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})(?:\s+.*)?$", text)
+    if match:
+        first, second, year = match.groups()
+        return f"{int(second):02d}/{int(first):02d}/{year}"
+
+    parsed = pd.to_datetime(text, errors="coerce")
+    if pd.notna(parsed):
+        return parsed.strftime("%d/%m/%Y")
+
+    return text
+
+
 def clean_status_funil(value) -> str:
     text = normalize_text(value)
     return re.sub(r"^\s*\d+\s*-\s*", "", text)
@@ -290,6 +307,18 @@ def sync_opportunities_with_smark() -> dict:
     smark_records = smark_ws.get_all_records()
 
     if not leads_records:
+        opp_required_headers = [
+            "data_lead",
+            "canal",
+            "user_id",
+            "oportunidade",
+            "data_oportunidade",
+            "consultor",
+            "status_funil",
+            "data_encerramento",
+        ]
+        opportunities_ws.clear()
+        opportunities_ws.update("A1:H1", [opp_required_headers])
         return {
             "matches": 0,
             "qualified_sim": 0,
@@ -302,17 +331,6 @@ def sync_opportunities_with_smark() -> dict:
 
     df_leads = pd.DataFrame(leads_records)
     df_smark = pd.DataFrame(smark_records)
-
-    if df_smark.empty:
-        return {
-            "matches": 0,
-            "qualified_sim": 0,
-            "qualified_duplicate": 0,
-            "opportunities_added": 0,
-            "opportunities_skipped": 0,
-            "leads_rows": len(df_leads),
-            "smark_rows": 0,
-        }
 
     base_email_col = "email" if "email" in df_leads.columns else "user_id_email" if "user_id_email" in df_leads.columns else None
     if base_email_col is None:
@@ -333,8 +351,6 @@ def sync_opportunities_with_smark() -> dict:
     if missing_smark:
         raise ValueError("A planilha do SMARK não possui as colunas obrigatórias: " + ", ".join(missing_smark))
 
-    if BASE_QUALIFIED_COLUMN not in df_leads.columns:
-        df_leads[BASE_QUALIFIED_COLUMN] = ""
     ensure_column_exists(leads_ws, BASE_QUALIFIED_COLUMN)
 
     opp_required_headers = [
@@ -349,13 +365,6 @@ def sync_opportunities_with_smark() -> dict:
     ]
     ensure_headers_exist(opportunities_ws, opp_required_headers)
 
-    opportunities_records = opportunities_ws.get_all_records()
-    existing_user_ids = {
-        normalize_text(row.get("user_id")).lower()
-        for row in opportunities_records
-        if normalize_text(row.get("user_id"))
-    }
-
     smark_map = {}
     for row in smark_records:
         email_norm = normalize_email(row.get(SMARK_EMAIL_COLUMN))
@@ -365,63 +374,67 @@ def sync_opportunities_with_smark() -> dict:
     leads_headers = leads_ws.row_values(1)
     qualified_col_idx = leads_headers.index(BASE_QUALIFIED_COLUMN) + 1
 
-    leads_updates = []
-    opportunities_to_append = []
+    qualified_values = []
+    opportunities_rows = []
     qualified_sim = 0
     qualified_duplicate = 0
     opportunities_added = 0
     opportunities_skipped = 0
     matches = 0
     processed_match_emails = set()
+    generated_user_ids = set()
 
-    for row_number, row in enumerate(leads_records, start=2):
+    for row in leads_records:
         email_norm = normalize_email(row.get(base_email_col))
-        if not email_norm or email_norm not in smark_map:
-            continue
+        target_value = ""
 
-        matches += 1
-        current_value = normalize_text(row.get(BASE_QUALIFIED_COLUMN)).upper()
-        if email_norm not in processed_match_emails:
-            target_value = "SIM"
-            processed_match_emails.add(email_norm)
-        else:
-            target_value = "Duplicado"
+        if email_norm and email_norm in smark_map:
+            matches += 1
+            if email_norm not in processed_match_emails:
+                target_value = "SIM"
+                processed_match_emails.add(email_norm)
+            else:
+                target_value = "Duplicado"
 
-        if current_value != target_value.upper():
-            a1_ref = gspread.utils.rowcol_to_a1(row_number, qualified_col_idx)
-            leads_updates.append({"range": a1_ref, "values": [[target_value]]})
+            if target_value == "SIM":
+                qualified_sim += 1
 
-        if target_value == "SIM":
-            qualified_sim += 1
-        else:
-            qualified_duplicate += 1
+                user_id_value = normalize_text(row.get("user_id_email"))
+                user_id_key = user_id_value.lower()
 
-        user_id_value = normalize_text(row.get("user_id_email"))
-        user_id_key = user_id_value.lower()
+                if not user_id_value or user_id_key in generated_user_ids:
+                    opportunities_skipped += 1
+                else:
+                    smark_row = smark_map[email_norm]
+                    opportunities_rows.append([
+                        format_date_br_from_any(row.get("data_hora")),
+                        "Site",
+                        user_id_value,
+                        normalize_text(smark_row.get("Cod. Oportunidade")),
+                        format_smark_swapped_date_to_br(smark_row.get("Data Oportunidade")),
+                        normalize_text(smark_row.get("Nome Colaborador Responsável")),
+                        clean_status_funil(smark_row.get("Funil de Venda")),
+                        format_smark_swapped_date_to_br(smark_row.get("Data Encerramento")),
+                    ])
+                    generated_user_ids.add(user_id_key)
+                    opportunities_added += 1
+            else:
+                qualified_duplicate += 1
 
-        if not user_id_value or user_id_key in existing_user_ids:
-            opportunities_skipped += 1
-            continue
+        qualified_values.append([target_value])
 
-        smark_row = smark_map[email_norm]
-        opportunities_to_append.append([
-            format_date_br_from_any(row.get("data_hora")),
-            "Site",
-            user_id_value,
-            normalize_text(smark_row.get("Cod. Oportunidade")),
-            format_date_br_from_any(smark_row.get("Data Oportunidade")),
-            normalize_text(smark_row.get("Nome Colaborador Responsável")),
-            clean_status_funil(smark_row.get("Funil de Venda")),
-            format_date_br_from_any(smark_row.get("Data Encerramento")),
-        ])
-        existing_user_ids.add(user_id_key)
-        opportunities_added += 1
+    if qualified_values:
+        qualified_col_letter = gspread.utils.rowcol_to_a1(1, qualified_col_idx)[:-1]
+        qualified_range = f"{qualified_col_letter}2:{qualified_col_letter}{len(qualified_values) + 1}"
+        leads_ws.update(qualified_range, qualified_values, value_input_option="USER_ENTERED")
 
-    if leads_updates:
-        leads_ws.batch_update(leads_updates, value_input_option="USER_ENTERED")
-
-    if opportunities_to_append:
-        opportunities_ws.append_rows(opportunities_to_append, value_input_option="USER_ENTERED")
+    opportunities_ws.clear()
+    opportunities_payload = [opp_required_headers] + opportunities_rows
+    opportunities_ws.update(
+        f"A1:{gspread.utils.rowcol_to_a1(len(opportunities_payload), len(opp_required_headers))}",
+        opportunities_payload,
+        value_input_option="USER_ENTERED",
+    )
 
     return {
         "matches": matches,
@@ -673,11 +686,8 @@ def compute_funnel_counts(
 # =============================================================================
 # SIDEBAR: FILTROS
 # =============================================================================
-sync_col_1, sync_col_2 = st.sidebar.columns([1, 1])
-with sync_col_1:
-    sync_clicked = st.button("Atualizar Oportunidades", use_container_width=True)
-with sync_col_2:
-    refresh_clicked = st.button("Atualizar Dados", use_container_width=True)
+sync_clicked = st.sidebar.button("Atualizar Oportunidades", use_container_width=True)
+refresh_clicked = st.sidebar.button("Atualizar Dashboard", use_container_width=True)
 
 if refresh_clicked:
     trigger_sheet_reload()
@@ -687,15 +697,20 @@ if sync_clicked:
         try:
             sync_result = sync_opportunities_with_smark()
             load_sheet.clear()
-            st.sidebar.success(
+            st.session_state["sync_message"] = (
                 f"Atualização concluída. Matches: {sync_result['matches']}. "
                 f"Qualificados com SIM: {sync_result['qualified_sim']}. "
                 f"Marcados como Duplicado: {sync_result['qualified_duplicate']}. "
-                f"Novas oportunidades: {sync_result['opportunities_added']}. "
-                f"Ignoradas por user_id já existente: {sync_result['opportunities_skipped']}."
+                f"Oportunidades regravadas: {sync_result['opportunities_added']}. "
+                f"Ignoradas por user_id duplicado no processamento: {sync_result['opportunities_skipped']}."
             )
+            st.rerun()
         except Exception as e:
             st.sidebar.error(f"Erro na atualização de oportunidades: {e}")
+
+if st.session_state.get("sync_message"):
+    st.sidebar.success(st.session_state["sync_message"])
+    st.session_state["sync_message"] = None
 
 st.sidebar.markdown("## Filtros")
 
