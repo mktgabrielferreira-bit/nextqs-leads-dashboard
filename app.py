@@ -1,4 +1,4 @@
-import base64
+
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -11,9 +11,6 @@ import plotly.graph_objects as go
 import streamlit as st
 from google.oauth2.service_account import Credentials
 
-# =============================================================================
-# CONFIGURAÇÃO INICIAL
-# =============================================================================
 st.set_page_config(
     page_title="Relatório de Leads",
     page_icon="📊",
@@ -43,13 +40,13 @@ SMARK_WORKSHEET_GID = 841055934
 SMARK_EMAIL_COLUMN = "E-mail Contato"
 BASE_QUALIFIED_COLUMN = "qualificado"
 OPPORTUNITIES_SHEET_NAME = "oportunidades"
+
 SHEETS_REQUIRED = [
     "leads_site",
     "sessions",
-    "click_whatsapp",
-    "click_formulario",
-    "form_start_whatsapp",
-    "form_start_formulario",
+]
+
+OPTIONAL_SHEETS = [
     "oportunidades",
 ]
 
@@ -83,9 +80,6 @@ COMPARE_COLOR_1 = "#2563EB"
 COMPARE_COLOR_2 = "#F97316"
 
 
-# =============================================================================
-# PROTEÇÃO POR SENHA
-# =============================================================================
 def login():
     st.title("🔒 Acesso restrito")
     senha = st.text_input("Digite a senha:", type="password")
@@ -93,6 +87,7 @@ def login():
     if st.button("Entrar"):
         if senha == st.secrets["SENHA_DASH"]:
             st.session_state["autenticado"] = True
+            st.rerun()
         else:
             st.error("Senha incorreta")
 
@@ -105,9 +100,6 @@ if not st.session_state["autenticado"]:
     st.stop()
 
 
-# =============================================================================
-# UTILITÁRIOS
-# =============================================================================
 def get_selected_company() -> dict:
     empresa = st.query_params.get("empresa", "nextqs")
     if empresa not in COMPANIES:
@@ -115,43 +107,43 @@ def get_selected_company() -> dict:
     return COMPANIES[empresa]
 
 
-def image_file_to_base64(path: str) -> str | None:
-    file_path = Path(path)
-    if not file_path.exists():
-        return None
-    return base64.b64encode(file_path.read_bytes()).decode("utf-8")
-
-
 def render_company_switcher(current_slug: str):
-    logo_nextqs = image_file_to_base64(COMPANIES["nextqs"]["logo_path"])
-    logo_starled = image_file_to_base64(COMPANIES["starled"]["logo_path"])
+    st.markdown("### Empresas")
+    col1, col2 = st.columns(2)
 
-    if not logo_nextqs or not logo_starled:
-        st.info(
-            "Adicione as logos em assets/logo-nextqs.png e assets/logo-starled.png para exibir o seletor visual das empresas."
-        )
-        return
+    with col1:
+        if st.button(
+            "NextQS",
+            use_container_width=True,
+            disabled=current_slug == "nextqs",
+            type="primary" if current_slug == "nextqs" else "secondary",
+        ):
+            st.query_params["empresa"] = "nextqs"
+            load_sheet.clear()
+            st.rerun()
 
-    border_nextqs = "3px solid #22c55e" if current_slug == "nextqs" else "1px solid rgba(255,255,255,0.15)"
-    border_starled = "3px solid #22c55e" if current_slug == "starled" else "1px solid rgba(255,255,255,0.15)"
+    with col2:
+        if st.button(
+            "StarLed",
+            use_container_width=True,
+            disabled=current_slug == "starled",
+            type="primary" if current_slug == "starled" else "secondary",
+        ):
+            st.query_params["empresa"] = "starled"
+            load_sheet.clear()
+            st.rerun()
 
-    st.markdown(
-        f"""
-        <div style="display:flex; gap:16px; align-items:center; margin-bottom:12px; flex-wrap:wrap;">
-            <a href="?empresa=nextqs" style="text-decoration:none;">
-                <div style="padding:10px; border-radius:16px; border:{border_nextqs}; background:rgba(255,255,255,0.03);">
-                    <img src="data:image/png;base64,{logo_nextqs}" style="height:64px; display:block;" />
-                </div>
-            </a>
-            <a href="?empresa=starled" style="text-decoration:none;">
-                <div style="padding:10px; border-radius:16px; border:{border_starled}; background:rgba(255,255,255,0.03);">
-                    <img src="data:image/png;base64,{logo_starled}" style="height:64px; display:block;" />
-                </div>
-            </a>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    logos = []
+    for slug in ["nextqs", "starled"]:
+        path = Path(COMPANIES[slug]["logo_path"])
+        if path.exists():
+            logos.append(path)
+
+    if logos:
+        cols = st.columns(len(logos))
+        for idx, path in enumerate(logos):
+            with cols[idx]:
+                st.image(str(path), use_container_width=True)
 
 
 def normalize_empty(value):
@@ -190,7 +182,7 @@ def month_label_to_num(mes_label: str) -> int:
 
 
 def filter_by_year_month(df: pd.DataFrame, ano: int, mes_num: int) -> pd.DataFrame:
-    if df.empty:
+    if df.empty or "ano" not in df.columns or "mes" not in df.columns:
         return df.copy()
     return df[(df["ano"] == int(ano)) & (df["mes"] == int(mes_num))].copy()
 
@@ -207,14 +199,6 @@ def label_evento(v):
     if "form" in v_str:
         return "Formulário"
     return str(v).title()
-
-
-def is_whatsapp_event(v) -> bool:
-    return "whats" in str(v).strip().lower()
-
-
-def is_form_event(v) -> bool:
-    return "form" in str(v).strip().lower()
 
 
 def _get_creds():
@@ -240,6 +224,13 @@ def get_worksheet_by_gid(spreadsheet, gid: int):
         if getattr(ws, "id", None) == gid:
             return ws
     raise ValueError(f"Não foi possível localizar a aba com gid={gid} na planilha do SMARK.")
+
+
+def get_or_create_worksheet(spreadsheet, title: str, rows: int = 1000, cols: int = 20):
+    try:
+        return spreadsheet.worksheet(title)
+    except gspread.exceptions.WorksheetNotFound:
+        return spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
 
 
 def ensure_column_exists(ws, column_name: str) -> int:
@@ -283,7 +274,7 @@ def format_date_br_from_any(value) -> str:
         except Exception:
             pass
 
-    parsed = pd.to_datetime(text, errors="coerce")
+    parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
     if pd.notna(parsed):
         return parsed.strftime("%d/%m/%Y")
     return text
@@ -306,15 +297,12 @@ def clean_status_funil(value) -> str:
     return re.sub(r"^\s*\d+\s*-\s*", "", text)
 
 
-# =============================================================================
-# SINCRONIZAÇÃO DE OPORTUNIDADES
-# =============================================================================
 def sync_opportunities_with_smark(company_slug: str) -> dict:
     client = get_gspread_client()
 
     base_spreadsheet = client.open_by_key(COMPANIES[company_slug]["base_spreadsheet_id"])
     leads_ws = base_spreadsheet.worksheet("leads_site")
-    opportunities_ws = base_spreadsheet.worksheet(OPPORTUNITIES_SHEET_NAME)
+    opportunities_ws = get_or_create_worksheet(base_spreadsheet, OPPORTUNITIES_SHEET_NAME)
 
     smark_spreadsheet = client.open_by_key(SMARK_SPREADSHEET_ID)
     smark_ws = get_worksheet_by_gid(smark_spreadsheet, SMARK_WORKSHEET_GID)
@@ -454,9 +442,6 @@ def sync_opportunities_with_smark(company_slug: str) -> dict:
     }
 
 
-# =============================================================================
-# CARREGAMENTO DOS DADOS
-# =============================================================================
 def _parse_datetime_series(s: pd.Series) -> pd.Series:
     if s is None or s.empty:
         return pd.to_datetime(pd.Series([], dtype="datetime64[ns]"))
@@ -499,7 +484,11 @@ def _standardize_common_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data
 def load_sheet(company_slug: str, sheet_name: str) -> pd.DataFrame:
-    ws = get_base_spreadsheet(company_slug).worksheet(sheet_name)
+    try:
+        ws = get_base_spreadsheet(company_slug).worksheet(sheet_name)
+    except gspread.exceptions.WorksheetNotFound:
+        return pd.DataFrame()
+
     data = ws.get_all_records()
     df = pd.DataFrame(data)
 
@@ -507,25 +496,12 @@ def load_sheet(company_slug: str, sheet_name: str) -> pd.DataFrame:
         return df
 
     if sheet_name == "oportunidades":
-        for col in ["user_id", "canal", "oportunidade", "consultor", "status_funil"]:
-            if col not in df.columns:
-                df[col] = None
-
-        for col in ["user_id", "canal", "oportunidade", "consultor", "status_funil"]:
-            df[col] = df[col].apply(normalize_empty)
-
-        date_source_col = None
-        for candidate in ["data_oportunidade", "data_lead", "data"]:
-            if candidate in df.columns:
-                date_source_col = candidate
-                break
-
-        if date_source_col is None:
-            df["data_hora"] = pd.NaT
+        if "data_oportunidade" in df.columns:
+            df["data_hora"] = pd.to_datetime(df["data_oportunidade"], dayfirst=True, errors="coerce")
+        elif "data_lead" in df.columns:
+            df["data_hora"] = pd.to_datetime(df["data_lead"], dayfirst=True, errors="coerce")
         else:
-            df["data_hora"] = pd.to_datetime(df[date_source_col], dayfirst=True, errors="coerce")
-            if df["data_hora"].isna().all():
-                df["data_hora"] = _parse_datetime_series(df[date_source_col])
+            df["data_hora"] = pd.NaT
     else:
         df = _standardize_common_columns(df)
 
@@ -540,19 +516,24 @@ def load_sheet(company_slug: str, sheet_name: str) -> pd.DataFrame:
         df["data_hora"] = _parse_datetime_series(df["data_hora"])
 
     df = df.dropna(subset=["data_hora"])
+
+    if df.empty:
+        return df
+
     df["data"] = df["data_hora"].dt.date
     df["ano"] = df["data_hora"].dt.year.astype(int)
     df["mes"] = df["data_hora"].dt.month.astype(int)
     df["hora"] = df["data_hora"].dt.hour
     df["dia_semana"] = df["data_hora"].dt.dayofweek.map(DIA_SEMANA_LABEL)
+
+    if sheet_name != "oportunidades":
+        df = _standardize_common_columns(df)
+
     return df
 
 
-# =============================================================================
-# FILTROS E KPI
-# =============================================================================
 def get_period_filtered_df(df_src: pd.DataFrame, periodo_sel: str, hoje: date, ontem: date) -> pd.DataFrame:
-    if df_src.empty:
+    if df_src.empty or "data" not in df_src.columns:
         return df_src
 
     if periodo_sel == "Hoje":
@@ -586,6 +567,8 @@ def apply_extra_filters_leads(df_base: pd.DataFrame, eventos_sel, origens_sel, d
 
 
 def apply_common_filters(df_base: pd.DataFrame, origens_sel, dispositivos_sel) -> pd.DataFrame:
+    if df_base.empty:
+        return df_base.copy()
     df_out = df_base.copy()
     if "origem" in df_out.columns:
         df_out = df_out[df_out["origem"].isin(origens_sel)]
@@ -629,9 +612,6 @@ def render_kpi_dual(title: str, value_1: str, value_2: str, color_1: str, color_
     )
 
 
-# =============================================================================
-# FUNIL CENTRAL
-# =============================================================================
 def build_funnel_figure(title: str, steps: list[tuple[str, int]], base_color: str, min_ratio: float = 0.18) -> go.Figure:
     labels = [s[0] for s in steps]
     values_real = [max(0, int(s[1])) for s in steps]
@@ -697,6 +677,7 @@ def build_funnel_figure(title: str, steps: list[tuple[str, int]], base_color: st
 def get_opportunities_count(df_opportunities: pd.DataFrame, origens_sel, dispositivos_sel, leads_base: pd.DataFrame) -> int:
     if df_opportunities.empty:
         return 0
+
     leads_filtered = apply_common_filters(leads_base, origens_sel, dispositivos_sel)
     if leads_filtered.empty or "user_id_email" not in leads_filtered.columns or "user_id" not in df_opportunities.columns:
         return len(df_opportunities)
@@ -736,9 +717,6 @@ def render_central_funnel(df_sessions, df_leads, df_opportunities, origens_sel, 
     st.plotly_chart(fig, use_container_width=True)
 
 
-# =============================================================================
-# RENDER PRINCIPAL
-# =============================================================================
 def render_normal_mode(df_periodo_leads, df_periodo_sessions, df_periodo_opportunities, eventos_sel, origens_sel, dispositivos_sel, periodo_sel):
     df_filtrado = apply_extra_filters_leads(df_periodo_leads, eventos_sel, origens_sel, dispositivos_sel)
 
@@ -846,12 +824,14 @@ def render_normal_mode(df_periodo_leads, df_periodo_sessions, df_periodo_opportu
     st.dataframe(df_filtrado[detail_columns], use_container_width=True)
 
 
-def render_compare_mode(dfs, df_leads, eventos_sel, origens_sel, dispositivos_sel, ano_sel, m1_label, m2_label):
+def render_compare_mode(dfs, df_leads, df_opportunities, eventos_sel, origens_sel, dispositivos_sel, ano_sel, m1_label, m2_label):
     m1_num = month_label_to_num(m1_label)
     m2_num = month_label_to_num(m2_label)
 
     df_m1_leads_base = filter_by_year_month(df_leads, ano_sel, m1_num)
     df_m2_leads_base = filter_by_year_month(df_leads, ano_sel, m2_num)
+    df_m1_opp = filter_by_year_month(df_opportunities, ano_sel, m1_num)
+    df_m2_opp = filter_by_year_month(df_opportunities, ano_sel, m2_num)
 
     df_m1 = apply_extra_filters_leads(df_m1_leads_base, eventos_sel, origens_sel, dispositivos_sel)
     df_m2 = apply_extra_filters_leads(df_m2_leads_base, eventos_sel, origens_sel, dispositivos_sel)
@@ -902,7 +882,7 @@ def render_compare_mode(dfs, df_leads, eventos_sel, origens_sel, dispositivos_se
         render_central_funnel(
             filter_by_year_month(dfs["sessions"], ano_sel, m1_num),
             df_m1_leads_base,
-            filter_by_year_month(dfs["oportunidades"], ano_sel, m1_num),
+            df_m1_opp,
             origens_sel,
             dispositivos_sel,
             title=f"Funil Central - {m1_label}/{ano_sel}",
@@ -912,7 +892,7 @@ def render_compare_mode(dfs, df_leads, eventos_sel, origens_sel, dispositivos_se
         render_central_funnel(
             filter_by_year_month(dfs["sessions"], ano_sel, m2_num),
             df_m2_leads_base,
-            filter_by_year_month(dfs["oportunidades"], ano_sel, m2_num),
+            df_m2_opp,
             origens_sel,
             dispositivos_sel,
             title=f"Funil Central - {m2_label}/{ano_sel}",
@@ -943,9 +923,6 @@ def render_compare_mode(dfs, df_leads, eventos_sel, origens_sel, dispositivos_se
         st.plotly_chart(fig_evento, use_container_width=True)
 
 
-# =============================================================================
-# APP
-# =============================================================================
 company = get_selected_company()
 company_slug = company["slug"]
 
@@ -978,6 +955,9 @@ if st.session_state.get("sync_message"):
 st.sidebar.markdown("## Filtros")
 
 dfs = {name: load_sheet(company_slug, name) for name in SHEETS_REQUIRED}
+for name in OPTIONAL_SHEETS:
+    dfs[name] = load_sheet(company_slug, name)
+
 df_leads = dfs["leads_site"]
 df_opportunities = dfs["oportunidades"]
 
@@ -1033,12 +1013,15 @@ if periodo_sel == "Personalizado":
         if custom_mes_label == "Todo o ano":
             df_periodo_leads = df_leads[df_leads["ano"] == custom_ano].copy()
             df_periodo_sessions = dfs["sessions"][dfs["sessions"]["ano"] == custom_ano].copy()
-            df_periodo_opportunities = df_opportunities[df_opportunities["ano"] == custom_ano].copy()
+            df_periodo_opportunities = df_opportunities[df_opportunities["ano"] == custom_ano].copy() if not df_opportunities.empty else df_opportunities
         else:
             mes_num_sel = month_label_to_num(custom_mes_label)
             df_periodo_leads = df_leads[(df_leads["ano"] == custom_ano) & (df_leads["mes"] == mes_num_sel)].copy()
             df_periodo_sessions = dfs["sessions"][(dfs["sessions"]["ano"] == custom_ano) & (dfs["sessions"]["mes"] == mes_num_sel)].copy()
-            df_periodo_opportunities = df_opportunities[(df_opportunities["ano"] == custom_ano) & (df_opportunities["mes"] == mes_num_sel)].copy()
+            if not df_opportunities.empty:
+                df_periodo_opportunities = df_opportunities[(df_opportunities["ano"] == custom_ano) & (df_opportunities["mes"] == mes_num_sel)].copy()
+            else:
+                df_periodo_opportunities = df_opportunities
     else:
         df_periodo_leads = get_period_filtered_df(df_leads, "Últimos 7 dias", hoje, ontem)
         df_periodo_sessions = get_period_filtered_df(dfs["sessions"], "Últimos 7 dias", hoje, ontem)
@@ -1061,8 +1044,8 @@ elif periodo_sel == "Comparar meses":
         st.session_state.setdefault("compare_mes1_label", opcoes_meses[-1])
         st.session_state.setdefault("compare_mes2_label", opcoes_meses[-2] if len(opcoes_meses) >= 2 else opcoes_meses[-1])
 
-        compare_mes1_label = st.selectbox("Mês 1", options=opcoes_meses, key="compare_mes1_label")
-        compare_mes2_label = st.selectbox("Mês 2", options=opcoes_meses, key="compare_mes2_label")
+        st.selectbox("Mês 1", options=opcoes_meses, key="compare_mes1_label")
+        st.selectbox("Mês 2", options=opcoes_meses, key="compare_mes2_label")
         aplicar_compare = st.button("Aplicar")
 
     st.session_state.setdefault("compare_aplicado", False)
@@ -1101,6 +1084,7 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
     render_compare_mode(
         dfs,
         df_leads,
+        df_opportunities,
         eventos_sel,
         origens_sel,
         dispositivos_sel,
