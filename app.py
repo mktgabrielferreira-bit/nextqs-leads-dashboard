@@ -108,7 +108,6 @@ def get_selected_company() -> dict:
 
 
 def render_company_switcher(current_slug: str):
-    st.markdown("### Empresas")
     col1, col2 = st.columns(2)
 
     with col1:
@@ -132,18 +131,6 @@ def render_company_switcher(current_slug: str):
             st.query_params["empresa"] = "starled"
             load_sheet.clear()
             st.rerun()
-
-    logos = []
-    for slug in ["nextqs", "starled"]:
-        path = Path(COMPANIES[slug]["logo_path"])
-        if path.exists():
-            logos.append(path)
-
-    if logos:
-        cols = st.columns(len(logos))
-        for idx, path in enumerate(logos):
-            with cols[idx]:
-                st.image(str(path), use_container_width=True)
 
 
 def normalize_empty(value):
@@ -926,6 +913,10 @@ def render_compare_mode(dfs, df_leads, df_opportunities, eventos_sel, origens_se
 company = get_selected_company()
 company_slug = company["slug"]
 
+logo_path = Path(company["logo_path"])
+if logo_path.exists():
+    st.sidebar.image(str(logo_path), use_container_width=True)
+
 sync_clicked = st.sidebar.button("Atualizar Oportunidades", use_container_width=True)
 refresh_clicked = st.sidebar.button("Atualizar Dashboard", use_container_width=True)
 
@@ -962,16 +953,10 @@ df_leads = dfs["leads_site"]
 df_opportunities = dfs["oportunidades"]
 
 render_company_switcher(company_slug)
-st.title(f"📊 {company['titulo']}")
 
 if df_leads.empty:
     st.warning(f"Nenhum dado encontrado na aba 'leads_site' da planilha {company['nome']}.")
     st.stop()
-
-st.caption(
-    f"Período disponível (Leads): {df_leads['data'].min()} até {df_leads['data'].max()} "
-    f"({df_leads['ano'].min()} - {df_leads['ano'].max()})"
-)
 
 PERIODOS = ["Hoje", "Ontem", "Últimos 7 dias", "Este mês", "Este ano", "Personalizado", "Comparar meses"]
 st.session_state.setdefault("periodo_sel", "Últimos 7 dias")
@@ -1057,7 +1042,6 @@ if not compare_mode:
     if df_periodo_leads.empty:
         st.warning("Nenhum Lead encontrado para o período selecionado.")
         st.stop()
-    st.caption(f"Período filtrado: {df_periodo_leads['data'].min()} até {df_periodo_leads['data'].max()}")
 
 st.sidebar.header("Filtros adicionais")
 if compare_mode and st.session_state.get("compare_aplicado", False):
