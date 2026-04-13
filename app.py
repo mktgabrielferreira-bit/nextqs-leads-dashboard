@@ -685,7 +685,7 @@ def compute_central_funnel_counts(df_sessions, df_leads, df_opportunities, orige
     return len(sessions_filtered), len(conversions_filtered), opportunities_count
 
 
-def render_central_funnel(df_sessions, df_leads, df_opportunities, origens_sel, dispositivos_sel, title="Funil Central"):
+def render_central_funnel(df_sessions, df_leads, df_opportunities, origens_sel, dispositivos_sel, title="Funil"):
     sessions_count, conversions_count, opportunities_count = compute_central_funnel_counts(
         df_sessions,
         df_leads,
@@ -862,7 +862,7 @@ def render_compare_mode(dfs, df_leads, df_opportunities, eventos_sel, origens_se
     st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("Funil Central")
+    st.subheader("Funil")
     tab_f1, tab_f2 = st.tabs([f"{m1_label}/{ano_sel}", f"{m2_label}/{ano_sel}"])
 
     with tab_f1:
@@ -872,7 +872,7 @@ def render_compare_mode(dfs, df_leads, df_opportunities, eventos_sel, origens_se
             df_m1_opp,
             origens_sel,
             dispositivos_sel,
-            title=f"Funil Central - {m1_label}/{ano_sel}",
+            title=f"Funil - {m1_label}/{ano_sel}",
         )
 
     with tab_f2:
@@ -882,7 +882,7 @@ def render_compare_mode(dfs, df_leads, df_opportunities, eventos_sel, origens_se
             df_m2_opp,
             origens_sel,
             dispositivos_sel,
-            title=f"Funil Central - {m2_label}/{ano_sel}",
+            title=f"Funil - {m2_label}/{ano_sel}",
         )
 
     st.markdown("---")
