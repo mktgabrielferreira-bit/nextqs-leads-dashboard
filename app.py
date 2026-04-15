@@ -48,6 +48,7 @@ SHEETS_REQUIRED = [
 
 OPTIONAL_SHEETS = [
     "oportunidades",
+    "leads_instagram",
 ]
 
 MESES_LABEL = {
@@ -284,12 +285,94 @@ def clean_status_funil(value) -> str:
     return re.sub(r"^\s*\d+\s*-\s*", "", text)
 
 
+def extract_phone_candidates(value) -> set[str]:
+    text = normalize_text(value)
+    if not text:
+        return set()
+
+    candidates = set()
+
+    pattern = re.compile(r"(?:\+?55\D*)?(?:\(?0?(\d{2})\)?\D*)?(9?\d{4,5})\D*(\d{4})")
+    for match in pattern.finditer(text):
+        ddd, prefix, suffix = match.groups()
+        phone_local = f"{prefix}{suffix}"
+        phone_local_digits = re.sub(r"\D", "", phone_local)
+        if len(phone_local_digits) in {8, 9}:
+            candidates.add(phone_local_digits)
+            if ddd and len(ddd) == 2:
+                ddd_digits = re.sub(r"\D", "", ddd)
+                if ddd_digits:
+                    national = f"{ddd_digits}{phone_local_digits}"
+                    candidates.add(national)
+                    candidates.add(f"55{national}")
+
+    raw_digits = re.sub(r"\D", "", text)
+    for size in (13, 12, 11, 10, 9, 8):
+        if len(raw_digits) >= size:
+            tail = raw_digits[-size:]
+            candidates.add(tail)
+            if len(tail) in {10, 11}:
+                candidates.add(f"55{tail}")
+            if len(tail) in {12, 13} and tail.startswith("55"):
+                candidates.add(tail[2:])
+
+    cleaned = set()
+    for candidate in candidates:
+        digits = re.sub(r"\D", "", candidate)
+        if digits:
+            cleaned.add(digits)
+    return cleaned
+
+
+def normalize_phone_for_lookup(value) -> str | None:
+    digits = re.sub(r"\D", "", normalize_text(value))
+    return digits or None
+
+
+def build_smark_email_map(smark_records: list[dict]) -> dict:
+    email_map = {}
+    for row in smark_records:
+        email_norm = normalize_email(row.get(SMARK_EMAIL_COLUMN))
+        if email_norm and email_norm not in email_map:
+            email_map[email_norm] = row
+    return email_map
+
+
+def build_smark_phone_map(smark_records: list[dict]) -> dict:
+    phone_map = {}
+    for row in smark_records:
+        for phone in extract_phone_candidates(row.get("Telefones")):
+            phone_map.setdefault(phone, row)
+    return phone_map
+
+
+def build_opportunity_row(data_lead, canal: str, user_id, smark_row: dict) -> list[str]:
+    return [
+        format_date_br_from_any(data_lead),
+        canal,
+        normalize_text(user_id),
+        normalize_text(smark_row.get("Cod. Oportunidade")),
+        format_smark_swapped_date_to_br(smark_row.get("Data Oportunidade")),
+        normalize_text(smark_row.get("Área de Atuação")),
+        normalize_text(smark_row.get("Nome Colaborador Responsável")),
+        clean_status_funil(smark_row.get("Funil de Venda")),
+        format_smark_swapped_date_to_br(smark_row.get("Data Encerramento")),
+    ]
+
+
 def sync_opportunities_with_smark(company_slug: str) -> dict:
     client = get_gspread_client()
 
     base_spreadsheet = client.open_by_key(COMPANIES[company_slug]["base_spreadsheet_id"])
     leads_ws = base_spreadsheet.worksheet("leads_site")
     opportunities_ws = get_or_create_worksheet(base_spreadsheet, OPPORTUNITIES_SHEET_NAME)
+
+    try:
+        leads_instagram_ws = base_spreadsheet.worksheet("leads_instagram")
+        instagram_records = leads_instagram_ws.get_all_records()
+    except gspread.exceptions.WorksheetNotFound:
+        leads_instagram_ws = None
+        instagram_records = []
 
     smark_spreadsheet = client.open_by_key(SMARK_SPREADSHEET_ID)
     smark_ws = get_worksheet_by_gid(smark_spreadsheet, SMARK_WORKSHEET_GID)
@@ -303,38 +386,22 @@ def sync_opportunities_with_smark(company_slug: str) -> dict:
         "user_id",
         "oportunidade",
         "data_oportunidade",
+        "area_atuação",
         "consultor",
         "status_funil",
         "data_encerramento",
     ]
 
-    if not leads_records:
-        opportunities_ws.clear()
-        opportunities_ws.update("A1:H1", [opp_required_headers])
-        return {
-            "matches": 0,
-            "qualified_sim": 0,
-            "qualified_duplicate": 0,
-            "opportunities_added": 0,
-            "opportunities_skipped": 0,
-            "leads_rows": 0,
-            "smark_rows": len(smark_records),
-        }
-
     df_leads = pd.DataFrame(leads_records)
     df_smark = pd.DataFrame(smark_records)
-
-    base_email_col = "email" if "email" in df_leads.columns else "user_id_email" if "user_id_email" in df_leads.columns else None
-    if base_email_col is None:
-        raise ValueError("A planilha base precisa ter a coluna 'email' ou 'user_id_email'.")
-
-    if "user_id_email" not in df_leads.columns:
-        raise ValueError("A aba 'leads_site' precisa ter a coluna 'user_id_email' para preencher 'user_id' em oportunidades.")
+    df_instagram = pd.DataFrame(instagram_records)
 
     required_smark_columns = [
         SMARK_EMAIL_COLUMN,
+        "Telefones",
         "Cod. Oportunidade",
         "Data Oportunidade",
+        "Área de Atuação",
         "Nome Colaborador Responsável",
         "Funil de Venda",
         "Data Encerramento",
@@ -343,62 +410,79 @@ def sync_opportunities_with_smark(company_slug: str) -> dict:
     if missing_smark:
         raise ValueError("A planilha do SMARK não possui as colunas obrigatórias: " + ", ".join(missing_smark))
 
+    if not df_leads.empty:
+        base_email_col = "email" if "email" in df_leads.columns else "user_id_email" if "user_id_email" in df_leads.columns else None
+        if base_email_col is None:
+            raise ValueError("A planilha base precisa ter a coluna 'email' ou 'user_id_email'.")
+        if "user_id_email" not in df_leads.columns:
+            raise ValueError("A aba 'leads_site' precisa ter a coluna 'user_id_email' para preencher 'user_id' em oportunidades.")
+    else:
+        base_email_col = None
+
+    if leads_instagram_ws is not None and not df_instagram.empty:
+        required_instagram_columns = ["telefone", "user_id_cel", "data"]
+        missing_instagram = [col for col in required_instagram_columns if col not in df_instagram.columns]
+        if missing_instagram:
+            raise ValueError("A aba 'leads_instagram' não possui as colunas obrigatórias: " + ", ".join(missing_instagram))
+
     ensure_column_exists(leads_ws, BASE_QUALIFIED_COLUMN)
     ensure_headers_exist(opportunities_ws, opp_required_headers)
 
-    smark_map = {}
-    for row in smark_records:
-        email_norm = normalize_email(row.get(SMARK_EMAIL_COLUMN))
-        if email_norm and email_norm not in smark_map:
-            smark_map[email_norm] = row
+    instagram_header_map = {}
+    if leads_instagram_ws is not None:
+        instagram_header_map = ensure_headers_exist(leads_instagram_ws, ["qualificado", "consultor"])
+
+    smark_email_map = build_smark_email_map(smark_records)
+    smark_phone_map = build_smark_phone_map(smark_records)
+
+    opportunities_by_code = {}
+    generated_user_ids_site = set()
+    processed_match_emails = set()
+    site_matches = 0
+    instagram_matches = 0
+    qualified_sim = 0
+    qualified_duplicate = 0
+    instagram_qualified_sim = 0
+    site_opportunities_added = 0
+    instagram_opportunities_added = 0
+    opportunities_skipped = 0
 
     leads_headers = leads_ws.row_values(1)
     qualified_col_idx = leads_headers.index(BASE_QUALIFIED_COLUMN) + 1
-
     qualified_values = []
-    opportunities_rows = []
-    qualified_sim = 0
-    qualified_duplicate = 0
-    opportunities_added = 0
-    opportunities_skipped = 0
-    matches = 0
-    processed_match_emails = set()
-    generated_user_ids = set()
 
     for row in leads_records:
-        email_norm = normalize_email(row.get(base_email_col))
+        email_norm = normalize_email(row.get(base_email_col)) if base_email_col else None
         target_value = ""
 
-        if email_norm and email_norm in smark_map:
-            matches += 1
+        if email_norm and email_norm in smark_email_map:
+            site_matches += 1
+            smark_row = smark_email_map[email_norm]
+
             if email_norm not in processed_match_emails:
                 target_value = "SIM"
                 processed_match_emails.add(email_norm)
-            else:
-                target_value = "Duplicado"
-
-            if target_value == "SIM":
                 qualified_sim += 1
+
+                opportunity_code = normalize_text(smark_row.get("Cod. Oportunidade"))
                 user_id_value = normalize_text(row.get("user_id_email"))
                 user_id_key = user_id_value.lower()
 
-                if not user_id_value or user_id_key in generated_user_ids:
+                if not opportunity_code or not user_id_value or user_id_key in generated_user_ids_site:
                     opportunities_skipped += 1
-                else:
-                    smark_row = smark_map[email_norm]
-                    opportunities_rows.append([
-                        format_date_br_from_any(row.get("data_hora")),
+                elif opportunity_code not in opportunities_by_code:
+                    opportunities_by_code[opportunity_code] = build_opportunity_row(
+                        row.get("data_hora"),
                         "Site",
                         user_id_value,
-                        normalize_text(smark_row.get("Cod. Oportunidade")),
-                        format_smark_swapped_date_to_br(smark_row.get("Data Oportunidade")),
-                        normalize_text(smark_row.get("Nome Colaborador Responsável")),
-                        clean_status_funil(smark_row.get("Funil de Venda")),
-                        format_smark_swapped_date_to_br(smark_row.get("Data Encerramento")),
-                    ])
-                    generated_user_ids.add(user_id_key)
-                    opportunities_added += 1
+                        smark_row,
+                    )
+                    generated_user_ids_site.add(user_id_key)
+                    site_opportunities_added += 1
+                else:
+                    opportunities_skipped += 1
             else:
+                target_value = "Duplicado"
                 qualified_duplicate += 1
 
         qualified_values.append([target_value])
@@ -408,8 +492,50 @@ def sync_opportunities_with_smark(company_slug: str) -> dict:
         qualified_range = f"{qualified_col_letter}2:{qualified_col_letter}{len(qualified_values) + 1}"
         leads_ws.update(qualified_range, qualified_values, value_input_option="USER_ENTERED")
 
+    instagram_qualified_values = []
+    instagram_consultor_values = []
+
+    for row in instagram_records:
+        phone_norm = normalize_phone_for_lookup(row.get("telefone"))
+        target_value = ""
+        consultor_value = ""
+
+        if phone_norm and phone_norm in smark_phone_map:
+            instagram_matches += 1
+            smark_row = smark_phone_map[phone_norm]
+            target_value = "SIM"
+            consultor_value = normalize_text(smark_row.get("Nome Colaborador Responsável"))
+            instagram_qualified_sim += 1
+
+            opportunity_code = normalize_text(smark_row.get("Cod. Oportunidade"))
+            if opportunity_code and opportunity_code not in opportunities_by_code:
+                opportunities_by_code[opportunity_code] = build_opportunity_row(
+                    row.get("data"),
+                    "Meta - Instagram Ads",
+                    row.get("user_id_cel"),
+                    smark_row,
+                )
+                instagram_opportunities_added += 1
+            else:
+                opportunities_skipped += 1
+
+        instagram_qualified_values.append([target_value])
+        instagram_consultor_values.append([consultor_value])
+
+    if leads_instagram_ws is not None and instagram_records:
+        qual_col_idx = instagram_header_map["qualificado"]
+        consultor_col_idx = instagram_header_map["consultor"]
+
+        qual_col_letter = gspread.utils.rowcol_to_a1(1, qual_col_idx)[:-1]
+        qual_range = f"{qual_col_letter}2:{qual_col_letter}{len(instagram_qualified_values) + 1}"
+        leads_instagram_ws.update(qual_range, instagram_qualified_values, value_input_option="USER_ENTERED")
+
+        consultor_col_letter = gspread.utils.rowcol_to_a1(1, consultor_col_idx)[:-1]
+        consultor_range = f"{consultor_col_letter}2:{consultor_col_letter}{len(instagram_consultor_values) + 1}"
+        leads_instagram_ws.update(consultor_range, instagram_consultor_values, value_input_option="USER_ENTERED")
+
+    opportunities_payload = [opp_required_headers] + list(opportunities_by_code.values())
     opportunities_ws.clear()
-    opportunities_payload = [opp_required_headers] + opportunities_rows
     opportunities_ws.update(
         f"A1:{gspread.utils.rowcol_to_a1(len(opportunities_payload), len(opp_required_headers))}",
         opportunities_payload,
@@ -417,12 +543,18 @@ def sync_opportunities_with_smark(company_slug: str) -> dict:
     )
 
     return {
-        "matches": matches,
+        "matches": site_matches + instagram_matches,
+        "site_matches": site_matches,
+        "instagram_matches": instagram_matches,
         "qualified_sim": qualified_sim,
         "qualified_duplicate": qualified_duplicate,
-        "opportunities_added": opportunities_added,
+        "instagram_qualified_sim": instagram_qualified_sim,
+        "opportunities_added": site_opportunities_added + instagram_opportunities_added,
+        "site_opportunities_added": site_opportunities_added,
+        "instagram_opportunities_added": instagram_opportunities_added,
         "opportunities_skipped": opportunities_skipped,
         "leads_rows": len(df_leads),
+        "instagram_rows": len(df_instagram),
         "smark_rows": len(df_smark),
         "worksheet_smark": smark_ws.title,
         "base_email_col": base_email_col,
@@ -929,11 +1061,15 @@ if sync_clicked:
             sync_result = sync_opportunities_with_smark(company_slug)
             load_sheet.clear()
             st.session_state["sync_message"] = (
-                f"Atualização concluída para {company['nome']}. Matches: {sync_result['matches']}. "
-                f"Qualificados com SIM: {sync_result['qualified_sim']}. "
-                f"Marcados como Duplicado: {sync_result['qualified_duplicate']}. "
-                f"Oportunidades regravadas: {sync_result['opportunities_added']}. "
-                f"Ignoradas por user_id duplicado no processamento: {sync_result['opportunities_skipped']}."
+                f"Atualização concluída para {company['nome']}. "
+                f"Matches site: {sync_result['site_matches']}. "
+                f"Matches Instagram: {sync_result['instagram_matches']}. "
+                f"Site qualificados com SIM: {sync_result['qualified_sim']}. "
+                f"Site marcados como Duplicado: {sync_result['qualified_duplicate']}. "
+                f"Instagram qualificados com SIM: {sync_result['instagram_qualified_sim']}. "
+                f"Oportunidades regravadas: {sync_result['opportunities_added']} "
+                f"(site: {sync_result['site_opportunities_added']}, instagram: {sync_result['instagram_opportunities_added']}). "
+                f"Ignoradas por duplicidade ou falta de chave: {sync_result['opportunities_skipped']}."
             )
             st.rerun()
         except Exception as e:
