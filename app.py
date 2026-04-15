@@ -269,20 +269,40 @@ def format_date_br_from_any(value) -> str:
 
 
 def format_smark_swapped_date_to_br(value) -> str:
-    text = normalize_text(value)
-    if not text:
-        return ""
-
-    match = re.match(r"^\s*(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:\s+.*)?$", text)
-    if match:
-        first, second, year = match.groups()
-        return f"{int(second):02d}/{int(first):02d}/{year}"
-    return text
+    return format_date_br_from_any(value)
 
 
 def clean_status_funil(value) -> str:
     text = normalize_text(value)
     return re.sub(r"^\s*\d+\s*-\s*", "", text)
+
+
+def _phone_variants_from_digits(digits: str) -> set[str]:
+    digits = re.sub(r"\D", "", digits or "")
+    if not digits:
+        return set()
+
+    variants = {digits}
+
+    if digits.startswith("55") and len(digits) > 2:
+        variants.add(digits[2:])
+
+    for item in list(variants):
+        if len(item) in {10, 11}:
+            variants.add(f"55{item}")
+
+    for item in list(variants):
+        core = item[2:] if item.startswith("55") and len(item) in {12, 13} else item
+        if len(core) == 10:
+            with_nine = core[:2] + "9" + core[2:]
+            variants.add(with_nine)
+            variants.add("55" + with_nine)
+        elif len(core) == 11 and core[2] == "9":
+            without_nine = core[:2] + core[3:]
+            variants.add(without_nine)
+            variants.add("55" + without_nine)
+
+    return {v for v in variants if v}
 
 
 def extract_phone_candidates(value) -> set[str]:
@@ -295,38 +315,35 @@ def extract_phone_candidates(value) -> set[str]:
     pattern = re.compile(r"(?:\+?55\D*)?(?:\(?0?(\d{2})\)?\D*)?(9?\d{4,5})\D*(\d{4})")
     for match in pattern.finditer(text):
         ddd, prefix, suffix = match.groups()
-        phone_local = f"{prefix}{suffix}"
-        phone_local_digits = re.sub(r"\D", "", phone_local)
-        if len(phone_local_digits) in {8, 9}:
-            candidates.add(phone_local_digits)
+        phone_local = re.sub(r"\D", "", f"{prefix}{suffix}")
+        if len(phone_local) in {8, 9}:
+            candidates.update(_phone_variants_from_digits(phone_local))
             if ddd and len(ddd) == 2:
                 ddd_digits = re.sub(r"\D", "", ddd)
-                if ddd_digits:
-                    national = f"{ddd_digits}{phone_local_digits}"
-                    candidates.add(national)
-                    candidates.add(f"55{national}")
+                national = f"{ddd_digits}{phone_local}"
+                candidates.update(_phone_variants_from_digits(national))
 
     raw_digits = re.sub(r"\D", "", text)
     for size in (13, 12, 11, 10, 9, 8):
         if len(raw_digits) >= size:
             tail = raw_digits[-size:]
-            candidates.add(tail)
-            if len(tail) in {10, 11}:
-                candidates.add(f"55{tail}")
-            if len(tail) in {12, 13} and tail.startswith("55"):
-                candidates.add(tail[2:])
+            candidates.update(_phone_variants_from_digits(tail))
 
-    cleaned = set()
-    for candidate in candidates:
-        digits = re.sub(r"\D", "", candidate)
-        if digits:
-            cleaned.add(digits)
-    return cleaned
+    return {re.sub(r"\D", "", c) for c in candidates if re.sub(r"\D", "", c)}
 
 
 def normalize_phone_for_lookup(value) -> str | None:
     digits = re.sub(r"\D", "", normalize_text(value))
-    return digits or None
+    if not digits:
+        return None
+
+    if digits.startswith("55") and len(digits) in {12, 13}:
+        digits = digits[2:]
+
+    if len(digits) == 10:
+        digits = digits[:2] + "9" + digits[2:]
+
+    return digits
 
 
 def build_smark_email_map(smark_records: list[dict]) -> dict:
