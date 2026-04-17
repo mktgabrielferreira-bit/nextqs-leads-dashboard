@@ -163,6 +163,11 @@ def normalize_text(value):
     return str(value).strip()
 
 
+def normalize_origin(value) -> str:
+    text = normalize_text(value)
+    return text if text else "Origem não identificada"
+
+
 def get_today_local() -> date:
     try:
         return datetime.now(ZoneInfo("America/Sao_Paulo")).date()
@@ -368,7 +373,7 @@ def build_smark_phone_map(smark_records: list[dict]) -> dict:
     return phone_map
 
 
-def build_opportunity_row(data_lead, canal: str, user_id, smark_row: dict) -> list[str]:
+def build_opportunity_row(data_lead, canal: str, user_id, origem, smark_row: dict) -> list[str]:
     return [
         format_date_br_from_any(data_lead),
         canal,
@@ -379,6 +384,7 @@ def build_opportunity_row(data_lead, canal: str, user_id, smark_row: dict) -> li
         normalize_text(smark_row.get("Nome Colaborador Responsável")),
         clean_status_funil(smark_row.get("Funil de Venda")),
         format_smark_swapped_date_to_br(smark_row.get("Data Encerramento")),
+        normalize_origin(origem),
     ]
 
 
@@ -556,6 +562,7 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
         "consultor",
         "status_funil",
         "data_encerramento",
+        "origem",
     ]
 
     df_leads = pd.DataFrame(leads_records)
@@ -641,6 +648,7 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
                         row.get("data_hora"),
                         "Site",
                         user_id_value,
+                        row.get("origem"),
                         smark_row,
                     )
                     generated_user_ids_site.add(user_id_key)
@@ -677,8 +685,9 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
             if opportunity_code and opportunity_code not in opportunities_by_code:
                 opportunities_by_code[opportunity_code] = build_opportunity_row(
                     row.get("data"),
-                    "Meta - Instagram Ads",
+                    "Instagram",
                     row.get("user_id_cel"),
+                    row.get("origem"),
                     smark_row,
                 )
                 instagram_opportunities_added += 1
@@ -1116,8 +1125,134 @@ def render_central_funnel_compare(
 
 
 # ---------------------------------------------------------------------------
-# Helpers de tabelas de campanhas e termos com colunas: Leads, Oportunidades, Negócios
+# Helpers de tabelas de origem, campanhas e termos
 # ---------------------------------------------------------------------------
+
+def build_unique_lead_key_from_row(row) -> str:
+    for col in ["user_id_email", "email", "user_id_cel", "telefone", "user_id"]:
+        value = normalize_text(row.get(col))
+        if value:
+            return value.lower()
+    return ""
+
+
+def prepare_leads_for_reporting(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["origem", "lead_key", "utm_campaign", "utm_term"])
+
+    out = df.copy()
+    if "origem" not in out.columns:
+        out["origem"] = None
+    if "utm_campaign" not in out.columns:
+        out["utm_campaign"] = None
+    if "utm_term" not in out.columns:
+        out["utm_term"] = None
+
+    out["origem"] = out["origem"].apply(normalize_origin)
+    out["lead_key"] = out.apply(build_unique_lead_key_from_row, axis=1)
+
+    missing_mask = out["lead_key"].eq("")
+    if missing_mask.any():
+        out.loc[missing_mask, "lead_key"] = [f"sem_id_{idx}" for idx in out[missing_mask].index]
+
+    return out
+
+
+def get_negocios_efetuados_df(df_opp_full: pd.DataFrame, periodo_sel: str, hoje: date, ontem: date) -> pd.DataFrame:
+    if df_opp_full.empty or "status_funil" not in df_opp_full.columns:
+        return pd.DataFrame(columns=df_opp_full.columns if not df_opp_full.empty else [])
+
+    df_neg = df_opp_full[
+        df_opp_full["status_funil"].astype(str).str.strip().str.lower() == "negócio efetuado"
+    ].copy()
+
+    if df_neg.empty:
+        return df_neg
+
+    if "data_encerramento_parsed" not in df_neg.columns:
+        return df_neg
+
+    df_neg = df_neg.dropna(subset=["data_encerramento_parsed"]).copy()
+    df_neg["data_enc_date"] = df_neg["data_encerramento_parsed"].dt.date
+
+    if periodo_sel == "Hoje":
+        return df_neg[df_neg["data_enc_date"] == hoje].copy()
+    if periodo_sel == "Ontem":
+        return df_neg[df_neg["data_enc_date"] == ontem].copy()
+    if periodo_sel == "Últimos 7 dias":
+        start = hoje - timedelta(days=7)
+        return df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= ontem)].copy()
+    if periodo_sel == "Este mês":
+        start = date(hoje.year, hoje.month, 1)
+        return df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= ontem)].copy()
+    if periodo_sel == "Este ano":
+        start = date(hoje.year, 1, 1)
+        return df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= hoje)].copy()
+    return df_neg.copy()
+
+
+def build_origin_table(
+    company_slug: str,
+    df_leads_site: pd.DataFrame,
+    df_leads_instagram: pd.DataFrame | None,
+    df_opportunities_periodo: pd.DataFrame,
+    df_negocios_periodo: pd.DataFrame,
+) -> pd.DataFrame:
+    leads_frames = []
+
+    if not df_leads_site.empty:
+        leads_frames.append(prepare_leads_for_reporting(df_leads_site))
+
+    if company_slug == "nextqs" and df_leads_instagram is not None and not df_leads_instagram.empty:
+        leads_frames.append(prepare_leads_for_reporting(df_leads_instagram))
+
+    if leads_frames:
+        df_leads_combined = pd.concat(leads_frames, ignore_index=True)
+        leads_por_origem = (
+            df_leads_combined.drop_duplicates(subset=["origem", "lead_key"])
+            .groupby("origem")["lead_key"]
+            .nunique()
+            .reset_index(name="Leads")
+        )
+    else:
+        leads_por_origem = pd.DataFrame(columns=["origem", "Leads"])
+
+    if not df_opportunities_periodo.empty:
+        df_opp = df_opportunities_periodo.copy()
+        df_opp["origem"] = df_opp.get("origem", pd.Series(index=df_opp.index, dtype="object")).apply(normalize_origin)
+        opp_por_origem = df_opp.groupby("origem").size().reset_index(name="Oportunidades")
+    else:
+        opp_por_origem = pd.DataFrame(columns=["origem", "Oportunidades"])
+
+    if not df_negocios_periodo.empty:
+        df_neg = df_negocios_periodo.copy()
+        df_neg["origem"] = df_neg.get("origem", pd.Series(index=df_neg.index, dtype="object")).apply(normalize_origin)
+        neg_por_origem = df_neg.groupby("origem").size().reset_index(name="Negócios")
+    else:
+        neg_por_origem = pd.DataFrame(columns=["origem", "Negócios"])
+
+    df_out = leads_por_origem.rename(columns={"origem": "Origem"})
+
+    if df_out.empty:
+        df_out = pd.DataFrame(columns=["Origem", "Leads"])
+
+    if not opp_por_origem.empty:
+        df_out = df_out.merge(opp_por_origem.rename(columns={"origem": "Origem"}), on="Origem", how="outer")
+    else:
+        df_out["Oportunidades"] = 0
+
+    if not neg_por_origem.empty:
+        df_out = df_out.merge(neg_por_origem.rename(columns={"origem": "Origem"}), on="Origem", how="outer")
+    else:
+        df_out["Negócios"] = 0
+
+    for col in ["Leads", "Oportunidades", "Negócios"]:
+        if col not in df_out.columns:
+            df_out[col] = 0
+        df_out[col] = df_out[col].fillna(0).astype(int)
+
+    return df_out.sort_values(["Leads", "Oportunidades", "Negócios"], ascending=False).reset_index(drop=True)
+
 
 def build_campaign_table(
     df_leads_filtrado: pd.DataFrame,
@@ -1209,8 +1344,10 @@ def render_normal_mode(
     ontem,
 ):
     df_filtrado = apply_extra_filters_leads(df_periodo_leads, eventos_sel, origens_sel, dispositivos_sel)
+    df_leads_instagram_periodo = get_period_filtered_df(dfs.get("leads_instagram", pd.DataFrame()), periodo_sel, hoje, ontem)
+    df_leads_instagram_filtrado = apply_common_filters(df_leads_instagram_periodo, origens_sel, dispositivos_sel)
 
-    if df_filtrado.empty:
+    if df_filtrado.empty and (company_slug != "nextqs" or df_leads_instagram_filtrado.empty):
         st.warning("Nenhum Lead encontrado para o período selecionado (após filtros).")
         st.stop()
 
@@ -1244,8 +1381,6 @@ def render_normal_mode(
 
     st.markdown("---")
 
-    # Funil novo: Leads → Oportunidades → Negócios Efetuados
-    df_leads_instagram_periodo = get_period_filtered_df(dfs.get("leads_instagram", pd.DataFrame()), periodo_sel, hoje, ontem)
     render_central_funnel(
         company_slug,
         dfs,
@@ -1259,7 +1394,6 @@ def render_normal_mode(
     )
     st.markdown("---")
 
-    # Gráficos: Leads por Origem e Leads por Evento
     col_g1, col_g2 = st.columns(2)
     with col_g1:
         st.subheader("Leads por Origem")
@@ -1276,7 +1410,6 @@ def render_normal_mode(
         fig_evento.update_layout(xaxis_title="Evento", yaxis_title="Leads")
         st.plotly_chart(fig_evento, use_container_width=True)
 
-    # Leads por Dispositivo e Horário dos Leads (abaixo de Origem e Evento)
     col_g3, col_g4 = st.columns(2)
     with col_g3:
         st.subheader("Leads por Dispositivo")
@@ -1292,28 +1425,40 @@ def render_normal_mode(
         fig_hora2.update_layout(xaxis_title="Hora do dia", yaxis_title="Leads")
         st.plotly_chart(fig_hora2, use_container_width=True)
 
-    # Campanhas e Termos de Pesquisa
-    col_rank1, col_rank2 = st.columns(2)
-    with col_rank1:
-        st.markdown("### Campanhas")
-        df_camp_table = build_campaign_table(df_filtrado, df_opp_full)
-        if df_camp_table.empty:
-            st.info("Nenhuma campanha válida encontrada no período filtrado.")
-        else:
-            st.dataframe(df_camp_table, use_container_width=True, height=400)
+    df_negocios_periodo = get_negocios_efetuados_df(df_opp_full, periodo_sel, hoje, ontem)
+    df_origem_table = build_origin_table(
+        company_slug,
+        df_filtrado,
+        df_leads_instagram_filtrado if not df_leads_instagram_filtrado.empty else None,
+        df_periodo_opportunities,
+        df_negocios_periodo,
+    )
 
-    with col_rank2:
-        st.markdown("### Termos de Pesquisa")
-        df_terms_table = build_terms_table(df_filtrado, df_opp_full)
-        if df_terms_table.empty:
-            st.info("Nenhuma palavra-chave válida encontrada no período filtrado.")
-        else:
-            st.dataframe(df_terms_table, use_container_width=True, height=400)
+    st.markdown("### Informações por Origem")
+    if df_origem_table.empty:
+        st.info("Nenhuma origem encontrada no período filtrado.")
+    else:
+        st.dataframe(df_origem_table, use_container_width=True, height=320)
+
+    st.markdown("### Informações por Campanhas")
+    df_camp_table = build_campaign_table(df_filtrado, df_opp_full)
+    if df_camp_table.empty:
+        st.info("Nenhuma campanha válida encontrada no período filtrado.")
+    else:
+        st.dataframe(df_camp_table, use_container_width=True, height=400)
+
+    st.markdown("### Informações por Termos de Pesquisa")
+    df_terms_table = build_terms_table(df_filtrado, df_opp_full)
+    if df_terms_table.empty:
+        st.info("Nenhuma palavra-chave válida encontrada no período filtrado.")
+    else:
+        st.dataframe(df_terms_table, use_container_width=True, height=400)
 
     st.markdown("---")
     st.subheader("Dados detalhados (após filtros)")
     detail_columns = [c for c in ["data_hora", "evento", "dispositivo", "origem", "user_id_email", "ip_address"] if c in df_filtrado.columns]
     st.dataframe(df_filtrado[detail_columns], use_container_width=True)
+
 
 
 def render_compare_mode(
@@ -1571,10 +1716,10 @@ with st.sidebar:
         st.session_state["sync_message"] = None
 
 # Processa o CSV enviado
-if smark_csv_file is not None:
-    file_token = f"{smark_csv_file.name}-{getattr(smark_csv_file, 'size', '0')}"
-    if st.session_state.get("last_smark_file_token") != file_token:
-        st.session_state["last_smark_file_token"] = file_token
+if send_smark_clicked:
+    if smark_csv_file is None:
+        st.sidebar.warning("Selecione um arquivo CSV antes de clicar em Enviar.")
+    else:
         with st.spinner("Enviando dados do SMARK para o Google Sheets..."):
             try:
                 upload_result = upload_csv_to_smark_sheet(smark_csv_file)
@@ -1601,7 +1746,6 @@ if smark_csv_file is not None:
                     st.rerun()
             except Exception as e:
                 st.sidebar.error(f"Erro ao enviar dados do SMARK: {e}")
-                st.session_state["last_smark_file_token"] = None
 
 if refresh_clicked:
     ultima_data_refresh = get_smark_ultima_data_from_sheet()
@@ -1713,15 +1857,25 @@ st.sidebar.header("Filtros adicionais")
 if compare_mode and st.session_state.get("compare_aplicado", False):
     m1_num = month_label_to_num(st.session_state["compare_mes1_label"])
     m2_num = month_label_to_num(st.session_state["compare_mes2_label"])
-    df_for_filters = pd.concat(
-        [
-            filter_by_year_month(df_leads, st.session_state["compare_ano"], m1_num),
-            filter_by_year_month(df_leads, st.session_state["compare_ano"], m2_num),
-        ],
-        ignore_index=True,
-    ).sort_values("data_hora")
+    df_filter_frames = [
+        filter_by_year_month(df_leads, st.session_state["compare_ano"], m1_num),
+        filter_by_year_month(df_leads, st.session_state["compare_ano"], m2_num),
+    ]
+    df_instagram_full = dfs.get("leads_instagram", pd.DataFrame())
+    if company_slug == "nextqs" and not df_instagram_full.empty:
+        df_filter_frames.extend(
+            [
+                filter_by_year_month(df_instagram_full, st.session_state["compare_ano"], m1_num),
+                filter_by_year_month(df_instagram_full, st.session_state["compare_ano"], m2_num),
+            ]
+        )
+    df_for_filters = pd.concat(df_filter_frames, ignore_index=True).sort_values("data_hora")
 else:
-    df_for_filters = df_periodo_leads
+    df_filter_frames = [df_periodo_leads]
+    df_periodo_leads_instagram_sidebar = get_period_filtered_df(dfs.get("leads_instagram", pd.DataFrame()), periodo_sel, hoje, ontem)
+    if company_slug == "nextqs" and not df_periodo_leads_instagram_sidebar.empty:
+        df_filter_frames.append(df_periodo_leads_instagram_sidebar)
+    df_for_filters = pd.concat(df_filter_frames, ignore_index=True).sort_values("data_hora")
 
 eventos = sorted(df_for_filters["evento"].dropna().unique().tolist()) if "evento" in df_for_filters.columns else []
 eventos_sel = st.sidebar.multiselect("Tipo de evento", options=eventos, default=eventos)
