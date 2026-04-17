@@ -1665,6 +1665,7 @@ if ultima_data_smark is None:
         st.session_state["ultima_data_smark"] = ultima_data_smark
 
 smark_csv_file = None
+send_smark_clicked = False
 
 with st.sidebar:
     upload_container = st.container()
@@ -1675,12 +1676,14 @@ with st.sidebar:
                     "<div class='smark-upload-hint'>Selecione o CSV exportado do SMARK para atualizar os dados.</div>",
                     unsafe_allow_html=True,
                 )
-                smark_csv_file = st.file_uploader(
-                    "Selecionar arquivo CSV do SMARK",
-                    type=["csv"],
-                    key="smark_csv_uploader",
-                    label_visibility="collapsed",
-                )
+                with st.form("smark_upload_form_popover", clear_on_submit=False):
+                    smark_csv_file = st.file_uploader(
+                        "Selecionar arquivo CSV do SMARK",
+                        type=["csv"],
+                        key="smark_csv_uploader",
+                        label_visibility="collapsed",
+                    )
+                    send_smark_clicked = st.form_submit_button("Enviar", use_container_width=True)
         else:
             if st.button("Enviar Dados SMARK", use_container_width=True, type="primary"):
                 st.session_state["open_upload_panel"] = not st.session_state["open_upload_panel"]
@@ -1691,12 +1694,14 @@ with st.sidebar:
                         "<div class='smark-upload-hint'>Selecione o CSV exportado do SMARK para atualizar os dados.</div>",
                         unsafe_allow_html=True,
                     )
-                    smark_csv_file = st.file_uploader(
-                        "Selecionar arquivo CSV do SMARK",
-                        type=["csv"],
-                        key="smark_csv_uploader",
-                        label_visibility="collapsed",
-                    )
+                    with st.form("smark_upload_form_expander", clear_on_submit=False):
+                        smark_csv_file = st.file_uploader(
+                            "Selecionar arquivo CSV do SMARK",
+                            type=["csv"],
+                            key="smark_csv_uploader",
+                            label_visibility="collapsed",
+                        )
+                        send_smark_clicked = st.form_submit_button("Enviar", use_container_width=True)
 
     refresh_clicked = st.button("Atualizar Dashboard", use_container_width=True)
 
