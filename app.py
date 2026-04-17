@@ -1455,69 +1455,104 @@ if logo_path.exists():
 # ---------------------------------------------------------------------------
 # Ações do SMARK na sidebar
 # ---------------------------------------------------------------------------
+st.session_state.setdefault("sync_message", None)
+st.session_state.setdefault("open_upload_panel", False)
+
 st.sidebar.markdown(
     """
     <style>
-    div[data-testid="stSidebar"] div.st-key-smark_csv_uploader > label,
-    div[data-testid="stSidebar"] div.st-key-smark_csv_uploader small,
-    div[data-testid="stSidebar"] div.st-key-smark_csv_uploader div[data-testid="stFileUploaderDropzoneInstructions"] {
-        display: none !important;
+    section[data-testid="stSidebar"] div[data-testid="stFileUploader"] > label {
+        display: none;
     }
-
-    div[data-testid="stSidebar"] div.st-key-smark_csv_uploader section[data-testid="stFileUploaderDropzone"] {
-        border: none !important;
-        padding: 0 !important;
-        background: transparent !important;
+    section[data-testid="stSidebar"] div[data-testid="stFileUploader"] section {
+        padding: 0.35rem 0 0 0;
+        border: 0;
+        background: transparent;
     }
-
-    div[data-testid="stSidebar"] div.st-key-smark_csv_uploader section[data-testid="stFileUploaderDropzone"] > button {
-        width: 100% !important;
-        min-height: 48px !important;
-        border-radius: 10px !important;
+    section[data-testid="stSidebar"] div[data-testid="stFileUploaderDropzone"] {
+        padding: 0.75rem;
+        border-radius: 12px;
     }
-
-    div[data-testid="stSidebar"] div.st-key-smark_csv_uploader section[data-testid="stFileUploaderDropzone"] > button > div {
-        font-size: 0 !important;
+    section[data-testid="stSidebar"] .smark-last-update {
+        font-size: 11px;
+        line-height: 1.15;
+        white-space: nowrap;
+        margin: 0.35rem 0 0 0;
+        opacity: 0.9;
     }
-
-    div[data-testid="stSidebar"] div.st-key-smark_csv_uploader section[data-testid="stFileUploaderDropzone"] > button::after {
-        content: "Enviar Dados SMARK";
-        font-size: 1rem;
-        font-weight: 600;
+    section[data-testid="stSidebar"] .smark-upload-hint {
+        font-size: 11px;
+        opacity: 0.78;
+        margin-top: 0.15rem;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-smark_csv_file = st.sidebar.file_uploader(
-    "Enviar Dados SMARK",
-    type=["csv"],
-    help="Selecione o arquivo CSV exportado do SMARK para atualizar os dados.",
-    key="smark_csv_uploader",
-    label_visibility="collapsed",
-)
-
-refresh_clicked = st.sidebar.button("Atualizar Dashboard", use_container_width=True)
-
-# Exibe a última data de atualização com SMARK abaixo dos botões
+# Exibe a última data de atualização com SMARK
 ultima_data_smark = st.session_state.get("ultima_data_smark")
 if ultima_data_smark is None:
     ultima_data_smark = get_smark_ultima_data_from_sheet()
     if ultima_data_smark:
         st.session_state["ultima_data_smark"] = ultima_data_smark
 
-if ultima_data_smark:
-    st.sidebar.markdown(
-        f"Última atualização com SMARK: **{ultima_data_smark}**"
-    )
-else:
-    st.sidebar.markdown("Última atualização com SMARK: **não registrada**")
+smark_csv_file = None
+
+with st.sidebar:
+    upload_container = st.container()
+    with upload_container:
+        if hasattr(st, "popover"):
+            with st.popover("Enviar Dados SMARK", use_container_width=True):
+                st.markdown(
+                    "<div class='smark-upload-hint'>Selecione o CSV exportado do SMARK para atualizar os dados.</div>",
+                    unsafe_allow_html=True,
+                )
+                smark_csv_file = st.file_uploader(
+                    "Selecionar arquivo CSV do SMARK",
+                    type=["csv"],
+                    key="smark_csv_uploader",
+                    label_visibility="collapsed",
+                )
+        else:
+            if st.button("Enviar Dados SMARK", use_container_width=True, type="primary"):
+                st.session_state["open_upload_panel"] = not st.session_state["open_upload_panel"]
+
+            if st.session_state.get("open_upload_panel", False):
+                with st.expander("Selecionar arquivo CSV", expanded=True):
+                    st.markdown(
+                        "<div class='smark-upload-hint'>Selecione o CSV exportado do SMARK para atualizar os dados.</div>",
+                        unsafe_allow_html=True,
+                    )
+                    smark_csv_file = st.file_uploader(
+                        "Selecionar arquivo CSV do SMARK",
+                        type=["csv"],
+                        key="smark_csv_uploader",
+                        label_visibility="collapsed",
+                    )
+
+    refresh_clicked = st.button("Atualizar Dashboard", use_container_width=True)
+
+    if ultima_data_smark:
+        st.markdown(
+            f"<div class='smark-last-update'>Última atualização com SMARK: <b>{ultima_data_smark}</b></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            "<div class='smark-last-update'><i>Nenhuma atualização SMARK registrada.</i></div>",
+            unsafe_allow_html=True,
+        )
+
+    if st.session_state.get("sync_message"):
+        st.success(st.session_state["sync_message"])
+        st.session_state["sync_message"] = None
 
 # Processa o CSV enviado
 if smark_csv_file is not None:
-    if st.session_state.get("last_smark_filename") != smark_csv_file.name:
-        st.session_state["last_smark_filename"] = smark_csv_file.name
+    file_token = f"{smark_csv_file.name}-{getattr(smark_csv_file, 'size', '0')}"
+    if st.session_state.get("last_smark_file_token") != file_token:
+        st.session_state["last_smark_file_token"] = file_token
         with st.spinner("Enviando dados do SMARK para o Google Sheets..."):
             try:
                 upload_result = upload_csv_to_smark_sheet(smark_csv_file)
@@ -1535,29 +1570,22 @@ if smark_csv_file is not None:
                     sync_result = sync_opportunities_with_smark(company_slug)
                     load_sheet.clear()
                     st.session_state["sync_message"] = (
-                        f"✅ CSV enviado ({upload_result['rows']} linhas) e atualização concluída para {company['nome']}. "
+                        f"CSV enviado com sucesso ({upload_result['rows']} linhas) para {company['nome']}. "
                         f"Matches site: {sync_result['site_matches']}. "
                         f"Matches Instagram: {sync_result['instagram_matches']}. "
-                        f"Site qualificados com SIM: {sync_result['qualified_sim']}. "
-                        f"Site marcados como Duplicado: {sync_result['qualified_duplicate']}. "
-                        f"Instagram qualificados com SIM: {sync_result['instagram_qualified_sim']}. "
-                        f"Oportunidades regravadas: {sync_result['opportunities_added']} "
-                        f"(site: {sync_result['site_opportunities_added']}, instagram: {sync_result['instagram_opportunities_added']}). "
-                        f"Ignoradas: {sync_result['opportunities_skipped']}."
+                        f"Oportunidades regravadas: {sync_result['opportunities_added']}."
                     )
+                    st.session_state["open_upload_panel"] = False
                     st.rerun()
             except Exception as e:
                 st.sidebar.error(f"Erro ao enviar dados do SMARK: {e}")
+                st.session_state["last_smark_file_token"] = None
 
 if refresh_clicked:
     ultima_data_refresh = get_smark_ultima_data_from_sheet()
     if ultima_data_refresh:
         st.session_state["ultima_data_smark"] = ultima_data_refresh
     trigger_sheet_reload()
-
-if st.session_state.get("sync_message"):
-    st.sidebar.success(st.session_state["sync_message"])
-    st.session_state["sync_message"] = None
 
 st.sidebar.markdown("## Filtros")
 
