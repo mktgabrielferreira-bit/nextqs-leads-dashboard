@@ -411,24 +411,48 @@ def upload_csv_to_smark_sheet(csv_file) -> dict:
     Lê o CSV exportado do SMARK, cola os dados na aba do SMARK no Google Sheets
     e retorna informações sobre o upload (última data, colunas divergentes).
     """
-    # Tenta ler com separador ponto-e-vírgula (padrão Brasil) e depois vírgula
-    try:
-        df_csv = pd.read_csv(csv_file, sep=";", encoding="utf-8-sig")
-        if df_csv.shape[1] <= 1:
-            csv_file.seek(0)
-            df_csv = pd.read_csv(csv_file, sep=",", encoding="utf-8-sig")
-    except Exception:
-        csv_file.seek(0)
-        df_csv = pd.read_csv(csv_file, sep=",", encoding="utf-8-sig")
+    csv_file.seek(0)
+    file_bytes = csv_file.getvalue()
+
+    encodings_to_try = ["utf-8-sig", "utf-8", "cp1252", "latin1"]
+    separators_to_try = [";", ","]
+
+    df_csv = None
+    last_error = None
+
+    for encoding in encodings_to_try:
+        for sep in separators_to_try:
+            try:
+                df_test = pd.read_csv(
+                    io.BytesIO(file_bytes),
+                    sep=sep,
+                    encoding=encoding,
+                )
+
+                # evita falso positivo quando o separador está errado
+                if df_test.shape[1] <= 1 and sep == ";":
+                    continue
+
+                df_csv = df_test
+                break
+            except Exception as e:
+                last_error = e
+
+        if df_csv is not None:
+            break
+
+    if df_csv is None:
+        raise ValueError(
+            f"Não foi possível ler o CSV do SMARK. "
+            f"Tente exportar novamente em CSV UTF-8. Erro original: {last_error}"
+        )
 
     # Aplica mapeamento de colunas divergentes (se houver)
     if SMARK_CSV_TO_SHEET_COLUMN_MAP:
         df_csv = df_csv.rename(columns=SMARK_CSV_TO_SHEET_COLUMN_MAP)
 
-    # Detecta colunas divergentes (presentes como obrigatórias mas ausentes no CSV)
     divergent_cols = [c for c in SMARK_REQUIRED_COLUMNS if c not in df_csv.columns]
 
-    # Determina última data de 'Data Oportunidade'
     ultima_data_str = None
     if "Data Oportunidade" in df_csv.columns:
         datas = pd.to_datetime(df_csv["Data Oportunidade"], dayfirst=True, errors="coerce")
@@ -436,7 +460,6 @@ def upload_csv_to_smark_sheet(csv_file) -> dict:
         if not datas.empty:
             ultima_data_str = datas.max().strftime("%d/%m/%Y")
 
-    # Cola os dados na planilha do SMARK (aba smark_data)
     client = get_gspread_client()
     smark_spreadsheet = client.open_by_key(SMARK_SPREADSHEET_ID)
     smark_ws = get_or_create_worksheet(
@@ -446,7 +469,6 @@ def upload_csv_to_smark_sheet(csv_file) -> dict:
         cols=max(30, len(df_csv.columns) + 2),
     )
 
-    # Prepara payload: cabeçalho + linhas (valores como string para evitar erros de tipo)
     df_str = df_csv.fillna("").astype(str)
     payload = [df_str.columns.tolist()] + df_str.values.tolist()
 
