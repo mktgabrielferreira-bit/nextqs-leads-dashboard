@@ -1,4 +1,5 @@
 
+import io
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -41,6 +42,9 @@ SMARK_EMAIL_COLUMN = "E-mail Contato"
 BASE_QUALIFIED_COLUMN = "qualificado"
 OPPORTUNITIES_SHEET_NAME = "oportunidades"
 
+# Nome da aba do SMARK no Google Sheets (onde o CSV será colado)
+SMARK_SHEET_TAB_NAME = "smark_data"
+
 SHEETS_REQUIRED = [
     "leads_site",
     "sessions",
@@ -79,6 +83,7 @@ DIA_SEMANA_LABEL = {
 GREEN_COLOR = "#22c55e"
 COMPARE_COLOR_1 = "#2563EB"
 COMPARE_COLOR_2 = "#F97316"
+FUNNEL_COLOR = "#B32157"
 
 
 def login():
@@ -377,7 +382,122 @@ def build_opportunity_row(data_lead, canal: str, user_id, smark_row: dict) -> li
     ]
 
 
-def sync_opportunities_with_smark(company_slug: str) -> dict:
+# ---------------------------------------------------------------------------
+# Função: upload CSV do SMARK e cola na planilha do SMARK no Sheets
+# ---------------------------------------------------------------------------
+
+# Mapeamento de colunas: nome no CSV → nome esperado internamente pelo sistema
+# Se algum campo tiver nome diferente no CSV, ajuste aqui.
+SMARK_CSV_TO_SHEET_COLUMN_MAP = {
+    # CSV col name       : Sheet col name (se iguais, não precisa mapear)
+    # Exemplo de divergência: "E-mail": "E-mail Contato"
+    # Adicione aqui se necessário. Por ora, usamos pass-through.
+}
+
+SMARK_REQUIRED_COLUMNS = [
+    "E-mail Contato",
+    "Telefones",
+    "Cod. Oportunidade",
+    "Data Oportunidade",
+    "Área de Atuação",
+    "Nome Colaborador Responsável",
+    "Funil de Venda",
+    "Data Encerramento",
+]
+
+
+def upload_csv_to_smark_sheet(csv_file) -> dict:
+    """
+    Lê o CSV exportado do SMARK, cola os dados na aba do SMARK no Google Sheets
+    e retorna informações sobre o upload (última data, colunas divergentes).
+    """
+    # Tenta ler com separador ponto-e-vírgula (padrão Brasil) e depois vírgula
+    try:
+        df_csv = pd.read_csv(csv_file, sep=";", encoding="utf-8-sig")
+        if df_csv.shape[1] <= 1:
+            csv_file.seek(0)
+            df_csv = pd.read_csv(csv_file, sep=",", encoding="utf-8-sig")
+    except Exception:
+        csv_file.seek(0)
+        df_csv = pd.read_csv(csv_file, sep=",", encoding="utf-8-sig")
+
+    # Aplica mapeamento de colunas divergentes (se houver)
+    if SMARK_CSV_TO_SHEET_COLUMN_MAP:
+        df_csv = df_csv.rename(columns=SMARK_CSV_TO_SHEET_COLUMN_MAP)
+
+    # Detecta colunas divergentes (presentes como obrigatórias mas ausentes no CSV)
+    divergent_cols = [c for c in SMARK_REQUIRED_COLUMNS if c not in df_csv.columns]
+
+    # Determina última data de 'Data Oportunidade'
+    ultima_data_str = None
+    if "Data Oportunidade" in df_csv.columns:
+        datas = pd.to_datetime(df_csv["Data Oportunidade"], dayfirst=True, errors="coerce")
+        datas = datas.dropna()
+        if not datas.empty:
+            ultima_data_str = datas.max().strftime("%d/%m/%Y")
+
+    # Cola os dados na planilha do SMARK (aba smark_data)
+    client = get_gspread_client()
+    smark_spreadsheet = client.open_by_key(SMARK_SPREADSHEET_ID)
+    smark_ws = get_or_create_worksheet(
+        smark_spreadsheet,
+        SMARK_SHEET_TAB_NAME,
+        rows=max(5000, len(df_csv) + 10),
+        cols=max(30, len(df_csv.columns) + 2),
+    )
+
+    # Prepara payload: cabeçalho + linhas (valores como string para evitar erros de tipo)
+    df_str = df_csv.fillna("").astype(str)
+    payload = [df_str.columns.tolist()] + df_str.values.tolist()
+
+    smark_ws.clear()
+    end_cell = gspread.utils.rowcol_to_a1(len(payload), len(df_csv.columns))
+    smark_ws.update(f"A1:{end_cell}", payload, value_input_option="USER_ENTERED")
+
+    return {
+        "rows": len(df_csv),
+        "cols": len(df_csv.columns),
+        "ultima_data": ultima_data_str,
+        "divergent_cols": divergent_cols,
+    }
+
+
+def get_smark_ultima_data_from_sheet() -> str | None:
+    """
+    Lê a aba smark_data da planilha do SMARK e retorna a última 'Data Oportunidade'.
+    Retorna None se não encontrar.
+    """
+    try:
+        client = get_gspread_client()
+        smark_spreadsheet = client.open_by_key(SMARK_SPREADSHEET_ID)
+        try:
+            ws = smark_spreadsheet.worksheet(SMARK_SHEET_TAB_NAME)
+        except gspread.exceptions.WorksheetNotFound:
+            # Tenta usar a aba original pelo GID
+            try:
+                ws = get_worksheet_by_gid(smark_spreadsheet, SMARK_WORKSHEET_GID)
+            except Exception:
+                return None
+
+        records = ws.get_all_records()
+        if not records:
+            return None
+        df = pd.DataFrame(records)
+        if "Data Oportunidade" not in df.columns:
+            return None
+        datas = pd.to_datetime(df["Data Oportunidade"], dayfirst=True, errors="coerce").dropna()
+        if datas.empty:
+            return None
+        return datas.max().strftime("%d/%m/%Y")
+    except Exception:
+        return None
+
+
+def sync_opportunities_with_smark(company_slug: str, smark_records_override: list[dict] | None = None) -> dict:
+    """
+    Sincroniza oportunidades. Se smark_records_override for fornecido (após upload de CSV),
+    usa esses registros em vez de buscar da planilha.
+    """
     client = get_gspread_client()
 
     base_spreadsheet = client.open_by_key(COMPANIES[company_slug]["base_spreadsheet_id"])
@@ -391,11 +511,18 @@ def sync_opportunities_with_smark(company_slug: str) -> dict:
         leads_instagram_ws = None
         instagram_records = []
 
-    smark_spreadsheet = client.open_by_key(SMARK_SPREADSHEET_ID)
-    smark_ws = get_worksheet_by_gid(smark_spreadsheet, SMARK_WORKSHEET_GID)
-
     leads_records = leads_ws.get_all_records()
-    smark_records = smark_ws.get_all_records()
+
+    # Obtém registros do SMARK (da planilha smark_data ou da original)
+    if smark_records_override is not None:
+        smark_records = smark_records_override
+    else:
+        smark_spreadsheet = client.open_by_key(SMARK_SPREADSHEET_ID)
+        try:
+            smark_ws_read = smark_spreadsheet.worksheet(SMARK_SHEET_TAB_NAME)
+        except gspread.exceptions.WorksheetNotFound:
+            smark_ws_read = get_worksheet_by_gid(smark_spreadsheet, SMARK_WORKSHEET_GID)
+        smark_records = smark_ws_read.get_all_records()
 
     opp_required_headers = [
         "data_lead",
@@ -573,7 +700,6 @@ def sync_opportunities_with_smark(company_slug: str) -> dict:
         "leads_rows": len(df_leads),
         "instagram_rows": len(df_instagram),
         "smark_rows": len(df_smark),
-        "worksheet_smark": smark_ws.title,
         "base_email_col": base_email_col,
     }
 
@@ -638,6 +764,12 @@ def load_sheet(company_slug: str, sheet_name: str) -> pd.DataFrame:
             df["data_hora"] = pd.to_datetime(df["data_lead"], dayfirst=True, errors="coerce")
         else:
             df["data_hora"] = pd.NaT
+
+        # Carrega data_encerramento como coluna de data para filtro de Negócios Efetuados
+        if "data_encerramento" in df.columns:
+            df["data_encerramento_parsed"] = pd.to_datetime(df["data_encerramento"], dayfirst=True, errors="coerce")
+        else:
+            df["data_encerramento_parsed"] = pd.NaT
     else:
         df = _standardize_common_columns(df)
 
@@ -773,7 +905,10 @@ def build_funnel_figure(title: str, steps: list[tuple[str, int]], base_color: st
             pct_prev.append(v / prev_real)
         prev_real = v
 
-    text_inside = [f"{v}<br>{p:.1%}" for v, p in zip(values_real, pct_initial)]
+    text_inside = [
+        f"<b style='color:white'>{v}</b><br><b style='color:white'>{p:.1%}</b>"
+        for v, p in zip(values_real, pct_initial)
+    ]
     customdata = [[v, p_i, p_p] for v, p_i, p_p in zip(values_real, pct_initial, pct_prev)]
 
     fig = go.Figure()
@@ -804,56 +939,253 @@ def build_funnel_figure(title: str, steps: list[tuple[str, int]], base_color: st
         height=460,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(size=14),
+        font=dict(size=14, color="white"),
         uniformtext=dict(minsize=10, mode="hide"),
     )
     return fig
 
 
-def get_opportunities_count(df_opportunities: pd.DataFrame, origens_sel, dispositivos_sel, leads_base: pd.DataFrame) -> int:
-    if df_opportunities.empty:
+# ---------------------------------------------------------------------------
+# Funções de contagem para o novo funil: Leads, Oportunidades, Negócios Efetuados
+# ---------------------------------------------------------------------------
+
+def get_leads_count_for_funnel(
+    company_slug: str,
+    dfs: dict,
+    df_periodo_leads_site: pd.DataFrame,
+    df_periodo_leads_instagram: pd.DataFrame | None,
+) -> int:
+    """
+    NextQS: leads_site + leads_instagram sem duplicações (por email/user_id_email).
+    StarLed: apenas leads_site sem duplicações.
+    """
+    if company_slug == "nextqs":
+        frames = []
+        if not df_periodo_leads_site.empty:
+            frames.append(df_periodo_leads_site)
+        if df_periodo_leads_instagram is not None and not df_periodo_leads_instagram.empty:
+            frames.append(df_periodo_leads_instagram)
+        if not frames:
+            return 0
+        combined = pd.concat(frames, ignore_index=True)
+        # Deduplicação por user_id_email quando disponível
+        if "user_id_email" in combined.columns:
+            unique_emails = combined["user_id_email"].dropna().nunique()
+            sem_email = combined["user_id_email"].isna().sum()
+            return unique_emails + sem_email
+        return len(combined)
+    else:
+        # StarLed: apenas leads_site
+        if df_periodo_leads_site.empty:
+            return 0
+        if "user_id_email" in df_periodo_leads_site.columns:
+            unique_emails = df_periodo_leads_site["user_id_email"].dropna().nunique()
+            sem_email = df_periodo_leads_site["user_id_email"].isna().sum()
+            return unique_emails + sem_email
+        return len(df_periodo_leads_site)
+
+
+def get_negocios_efetuados_count(df_opp_full: pd.DataFrame, periodo_sel: str, hoje: date, ontem: date) -> int:
+    """
+    Conta negócios efetuados filtrando por Data Encerramento no período selecionado
+    e status_funil == 'Negócio efetuado'.
+    """
+    if df_opp_full.empty:
+        return 0
+    if "status_funil" not in df_opp_full.columns:
         return 0
 
-    leads_filtered = apply_common_filters(leads_base, origens_sel, dispositivos_sel)
-    if leads_filtered.empty or "user_id_email" not in leads_filtered.columns or "user_id" not in df_opportunities.columns:
-        return len(df_opportunities)
+    df_neg = df_opp_full[
+        df_opp_full["status_funil"].str.strip().str.lower() == "negócio efetuado"
+    ].copy()
 
-    valid_user_ids = set(
-        leads_filtered["user_id_email"].dropna().astype(str).str.strip().str.lower().tolist()
-    )
-    opp_df = df_opportunities.copy()
-    opp_df["user_id_normalizado"] = opp_df["user_id"].astype(str).str.strip().str.lower()
-    opp_df = opp_df[opp_df["user_id_normalizado"].isin(valid_user_ids)]
-    return len(opp_df)
+    if df_neg.empty:
+        return 0
+
+    if "data_encerramento_parsed" not in df_neg.columns:
+        return len(df_neg)
+
+    df_neg = df_neg.dropna(subset=["data_encerramento_parsed"])
+    df_neg["data_enc_date"] = df_neg["data_encerramento_parsed"].dt.date
+
+    if periodo_sel == "Hoje":
+        return len(df_neg[df_neg["data_enc_date"] == hoje])
+    if periodo_sel == "Ontem":
+        return len(df_neg[df_neg["data_enc_date"] == ontem])
+    if periodo_sel == "Últimos 7 dias":
+        start = hoje - timedelta(days=7)
+        return len(df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= ontem)])
+    if periodo_sel == "Este mês":
+        start = date(hoje.year, hoje.month, 1)
+        return len(df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= ontem)])
+    if periodo_sel == "Este ano":
+        start = date(hoje.year, 1, 1)
+        return len(df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= hoje)])
+    # Personalizado ou outros: usa todos os que estão no df_opp já filtrado
+    return len(df_neg)
 
 
-def compute_central_funnel_counts(df_sessions, df_leads, df_opportunities, origens_sel, dispositivos_sel):
-    sessions_filtered = apply_common_filters(df_sessions, origens_sel, dispositivos_sel)
-    conversions_filtered = apply_common_filters(df_leads, origens_sel, dispositivos_sel)
-    opportunities_count = get_opportunities_count(df_opportunities, origens_sel, dispositivos_sel, df_leads)
-    return len(sessions_filtered), len(conversions_filtered), opportunities_count
+def get_negocios_efetuados_count_by_month(df_opp_full: pd.DataFrame, ano: int, mes_num: int) -> int:
+    """Conta negócios efetuados por mês (usando data_encerramento_parsed)."""
+    if df_opp_full.empty or "status_funil" not in df_opp_full.columns:
+        return 0
+    df_neg = df_opp_full[
+        df_opp_full["status_funil"].str.strip().str.lower() == "negócio efetuado"
+    ].copy()
+    if df_neg.empty or "data_encerramento_parsed" not in df_neg.columns:
+        return len(df_neg)
+    df_neg = df_neg.dropna(subset=["data_encerramento_parsed"])
+    df_neg = df_neg[
+        (df_neg["data_encerramento_parsed"].dt.year == ano)
+        & (df_neg["data_encerramento_parsed"].dt.month == mes_num)
+    ]
+    return len(df_neg)
 
 
-def render_central_funnel(df_sessions, df_leads, df_opportunities, origens_sel, dispositivos_sel, title="Funil"):
-    sessions_count, conversions_count, opportunities_count = compute_central_funnel_counts(
-        df_sessions,
-        df_leads,
-        df_opportunities,
-        origens_sel,
-        dispositivos_sel,
-    )
+def render_central_funnel(
+    company_slug: str,
+    dfs: dict,
+    df_leads_site_periodo: pd.DataFrame,
+    df_leads_instagram_periodo: pd.DataFrame | None,
+    df_opportunities_periodo: pd.DataFrame,
+    df_opp_full: pd.DataFrame,
+    periodo_sel: str,
+    hoje: date,
+    ontem: date,
+    title: str = "Funil",
+):
+    leads_count = get_leads_count_for_funnel(company_slug, dfs, df_leads_site_periodo, df_leads_instagram_periodo)
+    opp_count = len(df_opportunities_periodo) if not df_opportunities_periodo.empty else 0
+    negocios_count = get_negocios_efetuados_count(df_opp_full, periodo_sel, hoje, ontem)
 
     steps = [
-        ("Sessões", sessions_count),
-        ("Conversões", conversions_count),
-        ("Oportunidades", opportunities_count),
+        ("Leads", leads_count),
+        ("Oportunidades", opp_count),
+        ("Negócios Efetuados", negocios_count),
     ]
     st.subheader(title)
-    fig = build_funnel_figure("Sessões → Conversões → Oportunidades", steps, base_color="#22c55e")
+    fig = build_funnel_figure("", steps, base_color=FUNNEL_COLOR)
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_normal_mode(df_periodo_leads, df_periodo_sessions, df_periodo_opportunities, eventos_sel, origens_sel, dispositivos_sel, periodo_sel):
+def render_central_funnel_compare(
+    company_slug: str,
+    dfs: dict,
+    df_leads_site_periodo: pd.DataFrame,
+    df_leads_instagram_periodo: pd.DataFrame | None,
+    df_opportunities_periodo: pd.DataFrame,
+    df_opp_full: pd.DataFrame,
+    ano: int,
+    mes_num: int,
+    title: str = "Funil",
+):
+    leads_count = get_leads_count_for_funnel(company_slug, dfs, df_leads_site_periodo, df_leads_instagram_periodo)
+    opp_count = len(df_opportunities_periodo) if not df_opportunities_periodo.empty else 0
+    negocios_count = get_negocios_efetuados_count_by_month(df_opp_full, ano, mes_num)
+
+    steps = [
+        ("Leads", leads_count),
+        ("Oportunidades", opp_count),
+        ("Negócios Efetuados", negocios_count),
+    ]
+    st.subheader(title)
+    fig = build_funnel_figure("", steps, base_color=FUNNEL_COLOR)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
+# Helpers de tabelas de campanhas e termos com colunas: Leads, Oportunidades, Negócios
+# ---------------------------------------------------------------------------
+
+def build_campaign_table(
+    df_leads_filtrado: pd.DataFrame,
+    df_opp_full: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Cria tabela de campanhas com colunas: Campanha, Leads, Oportunidades, Negócios.
+    """
+    df_c = df_leads_filtrado[df_leads_filtrado["utm_campaign"] != "Campanha não identificada"].copy()
+    if df_c.empty:
+        return pd.DataFrame()
+
+    leads_por_camp = df_c.groupby("utm_campaign").size().reset_index(name="Leads")
+    leads_por_camp = leads_por_camp.rename(columns={"utm_campaign": "Campanha"})
+
+    # Oportunidades por campanha: join via user_id_email
+    if not df_opp_full.empty and "user_id" in df_opp_full.columns and "user_id_email" in df_c.columns:
+        opp_user_ids = set(df_opp_full["user_id"].dropna().astype(str).str.strip().str.lower())
+        neg_df = df_opp_full[df_opp_full["status_funil"].str.strip().str.lower() == "negócio efetuado"] if "status_funil" in df_opp_full.columns else pd.DataFrame()
+        neg_user_ids = set(neg_df["user_id"].dropna().astype(str).str.strip().str.lower()) if not neg_df.empty else set()
+
+        opp_counts = []
+        neg_counts = []
+        for _, row in leads_por_camp.iterrows():
+            camp_leads = df_c[df_c["utm_campaign"] == row["Campanha"]]
+            emails = set(camp_leads["user_id_email"].dropna().astype(str).str.strip().str.lower())
+            opp_counts.append(len(emails & opp_user_ids))
+            neg_counts.append(len(emails & neg_user_ids))
+        leads_por_camp["Oportunidades"] = opp_counts
+        leads_por_camp["Negócios"] = neg_counts
+    else:
+        leads_por_camp["Oportunidades"] = 0
+        leads_por_camp["Negócios"] = 0
+
+    return leads_por_camp.sort_values("Leads", ascending=False).reset_index(drop=True)
+
+
+def build_terms_table(
+    df_leads_filtrado: pd.DataFrame,
+    df_opp_full: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Cria tabela de termos de pesquisa com colunas: Palavra-chave, Leads, Oportunidades, Negócios.
+    """
+    df_t = df_leads_filtrado[df_leads_filtrado["utm_term"] != "Palavra-chave não identificada"].copy()
+    if df_t.empty:
+        return pd.DataFrame()
+
+    leads_por_term = df_t.groupby("utm_term").size().reset_index(name="Leads")
+    leads_por_term = leads_por_term.rename(columns={"utm_term": "Palavra-chave"})
+
+    if not df_opp_full.empty and "user_id" in df_opp_full.columns and "user_id_email" in df_t.columns:
+        opp_user_ids = set(df_opp_full["user_id"].dropna().astype(str).str.strip().str.lower())
+        neg_df = df_opp_full[df_opp_full["status_funil"].str.strip().str.lower() == "negócio efetuado"] if "status_funil" in df_opp_full.columns else pd.DataFrame()
+        neg_user_ids = set(neg_df["user_id"].dropna().astype(str).str.strip().str.lower()) if not neg_df.empty else set()
+
+        opp_counts = []
+        neg_counts = []
+        for _, row in leads_por_term.iterrows():
+            term_leads = df_t[df_t["utm_term"] == row["Palavra-chave"]]
+            emails = set(term_leads["user_id_email"].dropna().astype(str).str.strip().str.lower())
+            opp_counts.append(len(emails & opp_user_ids))
+            neg_counts.append(len(emails & neg_user_ids))
+        leads_por_term["Oportunidades"] = opp_counts
+        leads_por_term["Negócios"] = neg_counts
+    else:
+        leads_por_term["Oportunidades"] = 0
+        leads_por_term["Negócios"] = 0
+
+    return leads_por_term.sort_values("Leads", ascending=False).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Render modes
+# ---------------------------------------------------------------------------
+
+def render_normal_mode(
+    company_slug: str,
+    dfs: dict,
+    df_periodo_leads,
+    df_periodo_sessions,
+    df_periodo_opportunities,
+    df_opp_full,
+    eventos_sel,
+    origens_sel,
+    dispositivos_sel,
+    periodo_sel,
+    hoje,
+    ontem,
+):
     df_filtrado = apply_extra_filters_leads(df_periodo_leads, eventos_sel, origens_sel, dispositivos_sel)
 
     if df_filtrado.empty:
@@ -889,9 +1221,23 @@ def render_normal_mode(df_periodo_leads, df_periodo_sessions, df_periodo_opportu
         st.plotly_chart(fig_dia, use_container_width=True)
 
     st.markdown("---")
-    render_central_funnel(df_periodo_sessions, df_periodo_leads, df_periodo_opportunities, origens_sel, dispositivos_sel)
+
+    # Funil novo: Leads → Oportunidades → Negócios Efetuados
+    df_leads_instagram_periodo = get_period_filtered_df(dfs.get("leads_instagram", pd.DataFrame()), periodo_sel, hoje, ontem)
+    render_central_funnel(
+        company_slug,
+        dfs,
+        df_periodo_leads,
+        df_leads_instagram_periodo if not df_leads_instagram_periodo.empty else None,
+        df_periodo_opportunities,
+        df_opp_full,
+        periodo_sel,
+        hoje,
+        ontem,
+    )
     st.markdown("---")
 
+    # Gráficos: Leads por Origem e Leads por Evento
     col_g1, col_g2 = st.columns(2)
     with col_g1:
         st.subheader("Leads por Origem")
@@ -908,37 +1254,7 @@ def render_normal_mode(df_periodo_leads, df_periodo_sessions, df_periodo_opportu
         fig_evento.update_layout(xaxis_title="Evento", yaxis_title="Leads")
         st.plotly_chart(fig_evento, use_container_width=True)
 
-    col_rank1, col_rank2 = st.columns(2)
-    with col_rank1:
-        st.markdown("### Campanhas")
-        df_c = df_filtrado[df_filtrado["utm_campaign"] != "Campanha não identificada"]
-        if df_c.empty:
-            st.info("Nenhuma campanha válida encontrada no período filtrado.")
-        else:
-            ranking_campanhas = (
-                df_c.groupby("utm_campaign")
-                .size()
-                .reset_index(name="Conversões")
-                .sort_values("Conversões", ascending=False)
-                .rename(columns={"utm_campaign": "Campanha"})
-            )
-            st.dataframe(ranking_campanhas, use_container_width=True, height=400)
-
-    with col_rank2:
-        st.markdown("### Termos de Pesquisa")
-        df_t = df_filtrado[df_filtrado["utm_term"] != "Palavra-chave não identificada"]
-        if df_t.empty:
-            st.info("Nenhuma palavra-chave válida encontrada no período filtrado.")
-        else:
-            ranking_terms = (
-                df_t.groupby("utm_term")
-                .size()
-                .reset_index(name="Conversões")
-                .sort_values("Conversões", ascending=False)
-                .rename(columns={"utm_term": "Palavra-Chave"})
-            )
-            st.dataframe(ranking_terms, use_container_width=True, height=400)
-
+    # Leads por Dispositivo e Horário dos Leads (abaixo de Origem e Evento)
     col_g3, col_g4 = st.columns(2)
     with col_g3:
         st.subheader("Leads por Dispositivo")
@@ -950,9 +1266,27 @@ def render_normal_mode(df_periodo_leads, df_periodo_sessions, df_periodo_opportu
     with col_g4:
         st.subheader("Horário dos Leads")
         conv_hora = df_filtrado.groupby("hora").size().reset_index(name="leads").sort_values("hora")
-        fig_hora = px.bar(conv_hora, x="hora", y="leads")
-        fig_hora.update_layout(xaxis_title="Hora do dia", yaxis_title="Leads")
-        st.plotly_chart(fig_hora, use_container_width=True)
+        fig_hora2 = px.bar(conv_hora, x="hora", y="leads")
+        fig_hora2.update_layout(xaxis_title="Hora do dia", yaxis_title="Leads")
+        st.plotly_chart(fig_hora2, use_container_width=True)
+
+    # Campanhas e Termos de Pesquisa
+    col_rank1, col_rank2 = st.columns(2)
+    with col_rank1:
+        st.markdown("### Campanhas")
+        df_camp_table = build_campaign_table(df_filtrado, df_opp_full)
+        if df_camp_table.empty:
+            st.info("Nenhuma campanha válida encontrada no período filtrado.")
+        else:
+            st.dataframe(df_camp_table, use_container_width=True, height=400)
+
+    with col_rank2:
+        st.markdown("### Termos de Pesquisa")
+        df_terms_table = build_terms_table(df_filtrado, df_opp_full)
+        if df_terms_table.empty:
+            st.info("Nenhuma palavra-chave válida encontrada no período filtrado.")
+        else:
+            st.dataframe(df_terms_table, use_container_width=True, height=400)
 
     st.markdown("---")
     st.subheader("Dados detalhados (após filtros)")
@@ -960,7 +1294,21 @@ def render_normal_mode(df_periodo_leads, df_periodo_sessions, df_periodo_opportu
     st.dataframe(df_filtrado[detail_columns], use_container_width=True)
 
 
-def render_compare_mode(dfs, df_leads, df_opportunities, eventos_sel, origens_sel, dispositivos_sel, ano_sel, m1_label, m2_label):
+def render_compare_mode(
+    company_slug: str,
+    dfs,
+    df_leads,
+    df_opportunities,
+    df_opp_full,
+    eventos_sel,
+    origens_sel,
+    dispositivos_sel,
+    ano_sel,
+    m1_label,
+    m2_label,
+    hoje,
+    ontem,
+):
     m1_num = month_label_to_num(m1_label)
     m2_num = month_label_to_num(m2_label)
 
@@ -1014,23 +1362,34 @@ def render_compare_mode(dfs, df_leads, df_opportunities, eventos_sel, origens_se
     st.subheader("Funil")
     tab_f1, tab_f2 = st.tabs([f"{m1_label}/{ano_sel}", f"{m2_label}/{ano_sel}"])
 
+    # Instagram para compare mode
+    df_instagram_full = dfs.get("leads_instagram", pd.DataFrame())
+    df_ig_m1 = filter_by_year_month(df_instagram_full, ano_sel, m1_num) if not df_instagram_full.empty else pd.DataFrame()
+    df_ig_m2 = filter_by_year_month(df_instagram_full, ano_sel, m2_num) if not df_instagram_full.empty else pd.DataFrame()
+
     with tab_f1:
-        render_central_funnel(
-            filter_by_year_month(dfs["sessions"], ano_sel, m1_num),
+        render_central_funnel_compare(
+            company_slug,
+            dfs,
             df_m1_leads_base,
+            df_ig_m1 if not df_ig_m1.empty else None,
             df_m1_opp,
-            origens_sel,
-            dispositivos_sel,
+            df_opp_full,
+            ano_sel,
+            m1_num,
             title=f"Funil - {m1_label}/{ano_sel}",
         )
 
     with tab_f2:
-        render_central_funnel(
-            filter_by_year_month(dfs["sessions"], ano_sel, m2_num),
+        render_central_funnel_compare(
+            company_slug,
+            dfs,
             df_m2_leads_base,
+            df_ig_m2 if not df_ig_m2.empty else None,
             df_m2_opp,
-            origens_sel,
-            dispositivos_sel,
+            df_opp_full,
+            ano_sel,
+            m2_num,
             title=f"Funil - {m2_label}/{ano_sel}",
         )
 
@@ -1058,6 +1417,33 @@ def render_compare_mode(dfs, df_leads, df_opportunities, eventos_sel, origens_se
         fig_evento = px.bar(conv_evento, x="evento_legenda", y="leads", color="mes", barmode="group", color_discrete_map={f"{m1_label}/{ano_sel}": COMPARE_COLOR_1, f"{m2_label}/{ano_sel}": COMPARE_COLOR_2})
         st.plotly_chart(fig_evento, use_container_width=True)
 
+    # Dispositivo e Horário (abaixo de Origem e Evento)
+    col_g3, col_g4 = st.columns(2)
+    with col_g3:
+        st.subheader("Leads por Dispositivo")
+        d1 = df_m1.groupby("dispositivo").size().reset_index(name="leads")
+        d1["mes"] = f"{m1_label}/{ano_sel}"
+        d2 = df_m2.groupby("dispositivo").size().reset_index(name="leads")
+        d2["mes"] = f"{m2_label}/{ano_sel}"
+        conv_disp = pd.concat([d1, d2], ignore_index=True)
+        fig_disp = px.bar(conv_disp, x="dispositivo", y="leads", color="mes", barmode="group", color_discrete_map={f"{m1_label}/{ano_sel}": COMPARE_COLOR_1, f"{m2_label}/{ano_sel}": COMPARE_COLOR_2})
+        st.plotly_chart(fig_disp, use_container_width=True)
+
+    with col_g4:
+        st.subheader("Horário dos Leads")
+        h1 = df_m1.groupby("hora").size().reset_index(name="leads")
+        h1["mes"] = f"{m1_label}/{ano_sel}"
+        h2 = df_m2.groupby("hora").size().reset_index(name="leads")
+        h2["mes"] = f"{m2_label}/{ano_sel}"
+        conv_hora = pd.concat([h1, h2], ignore_index=True)
+        fig_hora = px.bar(conv_hora, x="hora", y="leads", color="mes", barmode="group", color_discrete_map={f"{m1_label}/{ano_sel}": COMPARE_COLOR_1, f"{m2_label}/{ano_sel}": COMPARE_COLOR_2})
+        fig_hora.update_layout(xaxis=dict(dtick=1))
+        st.plotly_chart(fig_hora, use_container_width=True)
+
+
+# ===========================================================================
+# MAIN
+# ===========================================================================
 
 company = get_selected_company()
 company_slug = company["slug"]
@@ -1066,31 +1452,81 @@ logo_path = Path(company["logo_path"])
 if logo_path.exists():
     st.sidebar.image(str(logo_path), use_container_width=True)
 
-sync_clicked = st.sidebar.button("Atualizar Oportunidades", use_container_width=True)
+# ---------------------------------------------------------------------------
+# Botão: Enviar Dados SMARK (upload de CSV)
+# ---------------------------------------------------------------------------
+smark_csv_file = st.sidebar.file_uploader(
+    "Enviar Dados SMARK",
+    type=["csv"],
+    help="Selecione o arquivo CSV exportado do SMARK para atualizar os dados.",
+    key="smark_csv_uploader",
+)
+
+# Exibe a última data de atualização com SMARK
+ultima_data_smark = st.session_state.get("ultima_data_smark")
+if ultima_data_smark is None:
+    # Tenta ler da planilha na primeira carga
+    ultima_data_smark = get_smark_ultima_data_from_sheet()
+    if ultima_data_smark:
+        st.session_state["ultima_data_smark"] = ultima_data_smark
+
+if ultima_data_smark:
+    st.sidebar.markdown(
+        f"<small>Última atualização com SMARK: <b>{ultima_data_smark}</b></small>",
+        unsafe_allow_html=True,
+    )
+else:
+    st.sidebar.markdown(
+        "<small><i>Nenhuma atualização SMARK registrada.</i></small>",
+        unsafe_allow_html=True,
+    )
+
+# Processa o CSV enviado
+if smark_csv_file is not None:
+    if st.session_state.get("last_smark_filename") != smark_csv_file.name:
+        st.session_state["last_smark_filename"] = smark_csv_file.name
+        with st.spinner("Enviando dados do SMARK para o Google Sheets..."):
+            try:
+                upload_result = upload_csv_to_smark_sheet(smark_csv_file)
+
+                if upload_result["divergent_cols"]:
+                    st.sidebar.warning(
+                        "⚠️ Colunas do CSV divergentes do esperado: "
+                        + ", ".join(upload_result["divergent_cols"])
+                    )
+
+                # Atualiza a última data
+                if upload_result["ultima_data"]:
+                    st.session_state["ultima_data_smark"] = upload_result["ultima_data"]
+
+                # Agora sincroniza oportunidades usando os dados recém-enviados
+                with st.spinner(f"Sincronizando oportunidades da {company['nome']}..."):
+                    # Relê os registros da aba smark_data recem atualizada
+                    sync_result = sync_opportunities_with_smark(company_slug)
+                    load_sheet.clear()
+                    st.session_state["sync_message"] = (
+                        f"✅ CSV enviado ({upload_result['rows']} linhas) e atualização concluída para {company['nome']}. "
+                        f"Matches site: {sync_result['site_matches']}. "
+                        f"Matches Instagram: {sync_result['instagram_matches']}. "
+                        f"Site qualificados com SIM: {sync_result['qualified_sim']}. "
+                        f"Site marcados como Duplicado: {sync_result['qualified_duplicate']}. "
+                        f"Instagram qualificados com SIM: {sync_result['instagram_qualified_sim']}. "
+                        f"Oportunidades regravadas: {sync_result['opportunities_added']} "
+                        f"(site: {sync_result['site_opportunities_added']}, instagram: {sync_result['instagram_opportunities_added']}). "
+                        f"Ignoradas: {sync_result['opportunities_skipped']}."
+                    )
+                    st.rerun()
+            except Exception as e:
+                st.sidebar.error(f"Erro ao enviar dados do SMARK: {e}")
+
 refresh_clicked = st.sidebar.button("Atualizar Dashboard", use_container_width=True)
 
 if refresh_clicked:
+    # Atualiza última data ao recarregar
+    ultima_data_refresh = get_smark_ultima_data_from_sheet()
+    if ultima_data_refresh:
+        st.session_state["ultima_data_smark"] = ultima_data_refresh
     trigger_sheet_reload()
-
-if sync_clicked:
-    with st.spinner(f"Atualizando oportunidades da {company['nome']} a partir do SMARK..."):
-        try:
-            sync_result = sync_opportunities_with_smark(company_slug)
-            load_sheet.clear()
-            st.session_state["sync_message"] = (
-                f"Atualização concluída para {company['nome']}. "
-                f"Matches site: {sync_result['site_matches']}. "
-                f"Matches Instagram: {sync_result['instagram_matches']}. "
-                f"Site qualificados com SIM: {sync_result['qualified_sim']}. "
-                f"Site marcados como Duplicado: {sync_result['qualified_duplicate']}. "
-                f"Instagram qualificados com SIM: {sync_result['instagram_qualified_sim']}. "
-                f"Oportunidades regravadas: {sync_result['opportunities_added']} "
-                f"(site: {sync_result['site_opportunities_added']}, instagram: {sync_result['instagram_opportunities_added']}). "
-                f"Ignoradas por duplicidade ou falta de chave: {sync_result['opportunities_skipped']}."
-            )
-            st.rerun()
-        except Exception as e:
-            st.sidebar.error(f"Erro na atualização de oportunidades: {e}")
 
 if st.session_state.get("sync_message"):
     st.sidebar.success(st.session_state["sync_message"])
@@ -1219,23 +1655,32 @@ dispositivos_sel = st.sidebar.multiselect("Dispositivo", options=dispositivos, d
 
 if compare_mode and st.session_state.get("compare_aplicado", False):
     render_compare_mode(
+        company_slug,
         dfs,
         df_leads,
         df_opportunities,
+        df_opportunities,  # df_opp_full para negócios efetuados
         eventos_sel,
         origens_sel,
         dispositivos_sel,
         int(st.session_state["compare_ano"]),
         st.session_state["compare_mes1_label"],
         st.session_state["compare_mes2_label"],
+        hoje,
+        ontem,
     )
 else:
     render_normal_mode(
+        company_slug,
+        dfs,
         df_periodo_leads,
         df_periodo_sessions,
         df_periodo_opportunities,
+        df_opportunities,  # df_opp_full para negócios efetuados
         eventos_sel,
         origens_sel,
         dispositivos_sel,
         periodo_sel,
+        hoje,
+        ontem,
     )
