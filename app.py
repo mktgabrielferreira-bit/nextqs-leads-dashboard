@@ -1453,33 +1453,66 @@ if logo_path.exists():
     st.sidebar.image(str(logo_path), use_container_width=True)
 
 # ---------------------------------------------------------------------------
-# Botão: Enviar Dados SMARK (upload de CSV)
+# Ações do SMARK na sidebar
 # ---------------------------------------------------------------------------
+st.sidebar.markdown(
+    """
+    <style>
+    div[data-testid="stSidebar"] div.st-key-smark_csv_uploader > label,
+    div[data-testid="stSidebar"] div.st-key-smark_csv_uploader small,
+    div[data-testid="stSidebar"] div.st-key-smark_csv_uploader div[data-testid="stFileUploaderDropzoneInstructions"] {
+        display: none !important;
+    }
+
+    div[data-testid="stSidebar"] div.st-key-smark_csv_uploader section[data-testid="stFileUploaderDropzone"] {
+        border: none !important;
+        padding: 0 !important;
+        background: transparent !important;
+    }
+
+    div[data-testid="stSidebar"] div.st-key-smark_csv_uploader section[data-testid="stFileUploaderDropzone"] > button {
+        width: 100% !important;
+        min-height: 48px !important;
+        border-radius: 10px !important;
+    }
+
+    div[data-testid="stSidebar"] div.st-key-smark_csv_uploader section[data-testid="stFileUploaderDropzone"] > button > div {
+        font-size: 0 !important;
+    }
+
+    div[data-testid="stSidebar"] div.st-key-smark_csv_uploader section[data-testid="stFileUploaderDropzone"] > button::after {
+        content: "Enviar Dados SMARK";
+        font-size: 1rem;
+        font-weight: 600;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 smark_csv_file = st.sidebar.file_uploader(
     "Enviar Dados SMARK",
     type=["csv"],
     help="Selecione o arquivo CSV exportado do SMARK para atualizar os dados.",
     key="smark_csv_uploader",
+    label_visibility="collapsed",
 )
 
-# Exibe a última data de atualização com SMARK
+refresh_clicked = st.sidebar.button("Atualizar Dashboard", use_container_width=True)
+
+# Exibe a última data de atualização com SMARK abaixo dos botões
 ultima_data_smark = st.session_state.get("ultima_data_smark")
 if ultima_data_smark is None:
-    # Tenta ler da planilha na primeira carga
     ultima_data_smark = get_smark_ultima_data_from_sheet()
     if ultima_data_smark:
         st.session_state["ultima_data_smark"] = ultima_data_smark
 
 if ultima_data_smark:
     st.sidebar.markdown(
-        f"<small>Última atualização com SMARK: <b>{ultima_data_smark}</b></small>",
-        unsafe_allow_html=True,
+        f"Última atualização com SMARK: **{ultima_data_smark}**"
     )
 else:
-    st.sidebar.markdown(
-        "<small><i>Nenhuma atualização SMARK registrada.</i></small>",
-        unsafe_allow_html=True,
-    )
+    st.sidebar.markdown("Última atualização com SMARK: **não registrada**")
 
 # Processa o CSV enviado
 if smark_csv_file is not None:
@@ -1495,13 +1528,10 @@ if smark_csv_file is not None:
                         + ", ".join(upload_result["divergent_cols"])
                     )
 
-                # Atualiza a última data
                 if upload_result["ultima_data"]:
                     st.session_state["ultima_data_smark"] = upload_result["ultima_data"]
 
-                # Agora sincroniza oportunidades usando os dados recém-enviados
                 with st.spinner(f"Sincronizando oportunidades da {company['nome']}..."):
-                    # Relê os registros da aba smark_data recem atualizada
                     sync_result = sync_opportunities_with_smark(company_slug)
                     load_sheet.clear()
                     st.session_state["sync_message"] = (
@@ -1519,10 +1549,7 @@ if smark_csv_file is not None:
             except Exception as e:
                 st.sidebar.error(f"Erro ao enviar dados do SMARK: {e}")
 
-refresh_clicked = st.sidebar.button("Atualizar Dashboard", use_container_width=True)
-
 if refresh_clicked:
-    # Atualiza última data ao recarregar
     ultima_data_refresh = get_smark_ultima_data_from_sheet()
     if ultima_data_refresh:
         st.session_state["ultima_data_smark"] = ultima_data_refresh
