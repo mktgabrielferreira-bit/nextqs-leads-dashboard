@@ -388,6 +388,22 @@ def build_opportunity_row(data_lead, canal: str, user_id, origem, smark_row: dic
     ]
 
 
+def build_opportunity_record(data_lead, canal: str, user_id, origem, smark_row: dict) -> dict[str, str]:
+    row = build_opportunity_row(data_lead, canal, user_id, origem, smark_row)
+    return {
+        "data_lead": row[0],
+        "canal": row[1],
+        "user_id": row[2],
+        "oportunidade": row[3],
+        "data_oportunidade": row[4],
+        "area_atuação": row[5],
+        "consultor": row[6],
+        "status_funil": row[7],
+        "data_encerramento": row[8],
+        "origem": row[9],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Função: upload CSV do SMARK e cola na planilha do SMARK no Sheets
 # ---------------------------------------------------------------------------
@@ -644,7 +660,7 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
                 if not opportunity_code or not user_id_value or user_id_key in generated_user_ids_site:
                     opportunities_skipped += 1
                 elif opportunity_code not in opportunities_by_code:
-                    opportunities_by_code[opportunity_code] = build_opportunity_row(
+                    opportunities_by_code[opportunity_code] = build_opportunity_record(
                         row.get("data_hora"),
                         "Site",
                         user_id_value,
@@ -683,7 +699,7 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
 
             opportunity_code = normalize_text(smark_row.get("Cod. Oportunidade"))
             if opportunity_code and opportunity_code not in opportunities_by_code:
-                opportunities_by_code[opportunity_code] = build_opportunity_row(
+                opportunities_by_code[opportunity_code] = build_opportunity_record(
                     row.get("data"),
                     "Instagram",
                     row.get("user_id_cel"),
@@ -709,10 +725,18 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
         consultor_range = f"{consultor_col_letter}2:{consultor_col_letter}{len(instagram_consultor_values) + 1}"
         leads_instagram_ws.update(consultor_range, instagram_consultor_values, value_input_option="USER_ENTERED")
 
-    opportunities_payload = [opp_required_headers] + list(opportunities_by_code.values())
+    opportunities_headers = opportunities_ws.row_values(1)
+    if not opportunities_headers:
+        opportunities_headers = opp_required_headers.copy()
+
+    opportunities_rows = [
+        [record.get(header, "") for header in opportunities_headers]
+        for record in opportunities_by_code.values()
+    ]
+    opportunities_payload = [opportunities_headers] + opportunities_rows
     opportunities_ws.clear()
     opportunities_ws.update(
-        f"A1:{gspread.utils.rowcol_to_a1(len(opportunities_payload), len(opp_required_headers))}",
+        f"A1:{gspread.utils.rowcol_to_a1(len(opportunities_payload), len(opportunities_headers))}",
         opportunities_payload,
         value_input_option="USER_ENTERED",
     )
