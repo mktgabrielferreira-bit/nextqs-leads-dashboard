@@ -162,6 +162,10 @@ def normalize_text(value):
     return str(value).strip()
 
 
+def has_qualified_marker(value) -> bool:
+    return normalize_text(value).lower() in {"sim", "duplicado"}
+
+
 def normalize_origin(value) -> str:
     text = normalize_text(value)
     return text if text else "Origem não identificada"
@@ -641,16 +645,18 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
 
     for row in leads_records:
         email_norm = normalize_email(row.get(base_email_col)) if base_email_col else None
-        target_value = ""
+        current_qualified_value = normalize_text(row.get(BASE_QUALIFIED_COLUMN))
+        target_value = current_qualified_value
 
         if email_norm and email_norm in smark_email_map:
             site_matches += 1
             smark_row = smark_email_map[email_norm]
 
             if email_norm not in processed_match_emails:
-                target_value = "SIM"
                 processed_match_emails.add(email_norm)
-                qualified_sim += 1
+                if not has_qualified_marker(current_qualified_value):
+                    target_value = "SIM"
+                    qualified_sim += 1
 
                 opportunity_code = normalize_text(smark_row.get("Cod. Oportunidade"))
                 user_id_value = normalize_text(row.get("user_id_email"))
@@ -671,8 +677,9 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
                 else:
                     opportunities_skipped += 1
             else:
-                target_value = "Duplicado"
-                qualified_duplicate += 1
+                if not has_qualified_marker(current_qualified_value):
+                    target_value = "Duplicado"
+                    qualified_duplicate += 1
 
         qualified_values.append([target_value])
 
