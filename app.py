@@ -52,6 +52,7 @@ SHEETS_REQUIRED = [
 OPTIONAL_SHEETS = [
     "oportunidades",
     "leads_meta_whatsapp",
+    "leads_meta_formulario",
 ]
 
 MESES_LABEL = {
@@ -285,6 +286,17 @@ def format_smark_swapped_date_to_br(value) -> str:
     return format_date_br_from_any(value)
 
 
+def parse_date_for_sort(value):
+    text = normalize_text(value)
+    if not text:
+        return pd.Timestamp.max
+
+    parsed = pd.to_datetime(text, dayfirst=True, errors="coerce")
+    if pd.isna(parsed):
+        return pd.Timestamp.max
+    return parsed
+
+
 def clean_status_funil(value) -> str:
     text = normalize_text(value)
     return re.sub(r"^\s*\d+\s*-\s*", "", text)
@@ -376,34 +388,36 @@ def build_smark_phone_map(smark_records: list[dict]) -> dict:
     return phone_map
 
 
-def build_opportunity_row(data_lead, canal: str, user_id, origem, smark_row: dict) -> list[str]:
+def build_opportunity_row(data_lead, canal: str, user_id, origem, campanha, smark_row: dict) -> list[str]:
     return [
+        format_smark_swapped_date_to_br(smark_row.get("Data Oportunidade")),
         format_date_br_from_any(data_lead),
         canal,
+        normalize_origin(origem),
+        normalize_text(campanha),
         normalize_text(user_id),
         normalize_text(smark_row.get("Cod. Oportunidade")),
-        format_smark_swapped_date_to_br(smark_row.get("Data Oportunidade")),
         normalize_text(smark_row.get("Área de Atuação")),
         normalize_text(smark_row.get("Nome Colaborador Responsável")),
         clean_status_funil(smark_row.get("Funil de Venda")),
         format_smark_swapped_date_to_br(smark_row.get("Data Encerramento")),
-        normalize_origin(origem),
     ]
 
 
-def build_opportunity_record(data_lead, canal: str, user_id, origem, smark_row: dict) -> dict[str, str]:
-    row = build_opportunity_row(data_lead, canal, user_id, origem, smark_row)
+def build_opportunity_record(data_lead, canal: str, user_id, origem, campanha, smark_row: dict) -> dict[str, str]:
+    row = build_opportunity_row(data_lead, canal, user_id, origem, campanha, smark_row)
     return {
-        "data_lead": row[0],
-        "canal": row[1],
-        "user_id": row[2],
-        "oportunidade": row[3],
-        "data_oportunidade": row[4],
-        "area_atuação": row[5],
-        "consultor": row[6],
-        "status_funil": row[7],
-        "data_encerramento": row[8],
-        "origem": row[9],
+        "data_oportunidade": row[0],
+        "data_lead": row[1],
+        "canal": row[2],
+        "origem": row[3],
+        "campanha": row[4],
+        "user_id": row[5],
+        "oportunidade": row[6],
+        "area_atuação": row[7],
+        "consultor": row[8],
+        "status_funil": row[9],
+        "data_encerramento": row[10],
     }
 
 
@@ -558,6 +572,13 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
         leads_meta_whatsapp_ws = None
         instagram_records = []
 
+    try:
+        leads_meta_formulario_ws = base_spreadsheet.worksheet("leads_meta_formulario")
+        formulario_records = leads_meta_formulario_ws.get_all_records()
+    except gspread.exceptions.WorksheetNotFound:
+        leads_meta_formulario_ws = None
+        formulario_records = []
+
     leads_records = leads_ws.get_all_records()
 
     # Obtém registros do SMARK (da planilha smark_data ou da original)
@@ -572,21 +593,23 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
         smark_records = smark_ws_read.get_all_records()
 
     opp_required_headers = [
+        "data_oportunidade",
         "data_lead",
         "canal",
+        "origem",
+        "campanha",
         "user_id",
         "oportunidade",
-        "data_oportunidade",
         "area_atuação",
         "consultor",
         "status_funil",
         "data_encerramento",
-        "origem",
     ]
 
     df_leads = pd.DataFrame(leads_records)
     df_smark = pd.DataFrame(smark_records)
     df_instagram = pd.DataFrame(instagram_records)
+    df_formulario = pd.DataFrame(formulario_records)
 
     required_smark_columns = [
         SMARK_EMAIL_COLUMN,
@@ -612,10 +635,16 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
         base_email_col = None
 
     if leads_meta_whatsapp_ws is not None and not df_instagram.empty:
-        required_instagram_columns = ["telefone", "user_id_cel", "data"]
+        required_instagram_columns = ["telefone", "user_id_cel", "data", "campanha"]
         missing_instagram = [col for col in required_instagram_columns if col not in df_instagram.columns]
         if missing_instagram:
             raise ValueError("A aba 'leads_meta_whatsapp' não possui as colunas obrigatórias: " + ", ".join(missing_instagram))
+
+    if leads_meta_formulario_ws is not None and not df_formulario.empty:
+        required_formulario_columns = ["email", "user_id_email", "data_hora", "origem", "campanha"]
+        missing_formulario = [col for col in required_formulario_columns if col not in df_formulario.columns]
+        if missing_formulario:
+            raise ValueError("A aba 'leads_meta_formulario' não possui as colunas obrigatórias: " + ", ".join(missing_formulario))
 
     ensure_column_exists(leads_ws, BASE_QUALIFIED_COLUMN)
     ensure_headers_exist(opportunities_ws, opp_required_headers)
@@ -623,6 +652,10 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
     instagram_header_map = {}
     if leads_meta_whatsapp_ws is not None:
         instagram_header_map = ensure_headers_exist(leads_meta_whatsapp_ws, ["qualificado", "consultor"])
+
+    formulario_header_map = {}
+    if leads_meta_formulario_ws is not None:
+        formulario_header_map = ensure_headers_exist(leads_meta_formulario_ws, ["qualificado"])
 
     smark_email_map = build_smark_email_map(smark_records)
     smark_phone_map = build_smark_phone_map(smark_records)
@@ -632,11 +665,14 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
     processed_match_emails = set()
     site_matches = 0
     instagram_matches = 0
+    formulario_matches = 0
     qualified_sim = 0
     qualified_duplicate = 0
     instagram_qualified_sim = 0
+    formulario_qualified_sim = 0
     site_opportunities_added = 0
     instagram_opportunities_added = 0
+    formulario_opportunities_added = 0
     opportunities_skipped = 0
 
     leads_headers = leads_ws.row_values(1)
@@ -670,6 +706,7 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
                         "Site",
                         user_id_value,
                         row.get("origem"),
+                        row.get("utm_campaign"),
                         smark_row,
                     )
                     generated_user_ids_site.add(user_id_key)
@@ -687,6 +724,41 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
         qualified_col_letter = gspread.utils.rowcol_to_a1(1, qualified_col_idx)[:-1]
         qualified_range = f"{qualified_col_letter}2:{qualified_col_letter}{len(qualified_values) + 1}"
         leads_ws.update(qualified_range, qualified_values, value_input_option="USER_ENTERED")
+
+    formulario_qualified_values = []
+
+    for row in formulario_records:
+        email_norm = normalize_email(row.get("email"))
+        current_qualified_value = normalize_text(row.get("qualificado"))
+        target_value = current_qualified_value
+
+        if email_norm and email_norm in smark_email_map:
+            formulario_matches += 1
+            smark_row = smark_email_map[email_norm]
+            target_value = "SIM"
+            formulario_qualified_sim += 1
+
+            opportunity_code = normalize_text(smark_row.get("Cod. Oportunidade"))
+            if opportunity_code and opportunity_code not in opportunities_by_code:
+                opportunities_by_code[opportunity_code] = build_opportunity_record(
+                    row.get("data_hora"),
+                    "Meta - Formulário",
+                    row.get("user_id_email"),
+                    row.get("origem"),
+                    row.get("campanha"),
+                    smark_row,
+                )
+                formulario_opportunities_added += 1
+            else:
+                opportunities_skipped += 1
+
+        formulario_qualified_values.append([target_value])
+
+    if leads_meta_formulario_ws is not None and formulario_records:
+        qual_col_idx = formulario_header_map["qualificado"]
+        qual_col_letter = gspread.utils.rowcol_to_a1(1, qual_col_idx)[:-1]
+        qual_range = f"{qual_col_letter}2:{qual_col_letter}{len(formulario_qualified_values) + 1}"
+        leads_meta_formulario_ws.update(qual_range, formulario_qualified_values, value_input_option="USER_ENTERED")
 
     instagram_qualified_values = []
     instagram_consultor_values = []
@@ -707,9 +779,10 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
             if opportunity_code and opportunity_code not in opportunities_by_code:
                 opportunities_by_code[opportunity_code] = build_opportunity_record(
                     row.get("data"),
-                    "Instagram",
+                    "Meta - Whatsapp",
                     row.get("user_id_cel"),
                     row.get("origem"),
+                    row.get("campanha"),
                     smark_row,
                 )
                 instagram_opportunities_added += 1
@@ -731,13 +804,15 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
         consultor_range = f"{consultor_col_letter}2:{consultor_col_letter}{len(instagram_consultor_values) + 1}"
         leads_meta_whatsapp_ws.update(consultor_range, instagram_consultor_values, value_input_option="USER_ENTERED")
 
-    opportunities_headers = opportunities_ws.row_values(1)
-    if not opportunities_headers:
-        opportunities_headers = opp_required_headers.copy()
+    opportunities_headers = opp_required_headers.copy()
 
+    opportunities_records = sorted(
+        opportunities_by_code.values(),
+        key=lambda record: parse_date_for_sort(record.get("data_oportunidade")),
+    )
     opportunities_rows = [
         [record.get(header, "") for header in opportunities_headers]
-        for record in opportunities_by_code.values()
+        for record in opportunities_records
     ]
     opportunities_payload = [opportunities_headers] + opportunities_rows
     opportunities_ws.clear()
@@ -748,18 +823,22 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
     )
 
     return {
-        "matches": site_matches + instagram_matches,
+        "matches": site_matches + instagram_matches + formulario_matches,
         "site_matches": site_matches,
         "instagram_matches": instagram_matches,
+        "formulario_matches": formulario_matches,
         "qualified_sim": qualified_sim,
         "qualified_duplicate": qualified_duplicate,
         "instagram_qualified_sim": instagram_qualified_sim,
-        "opportunities_added": site_opportunities_added + instagram_opportunities_added,
+        "formulario_qualified_sim": formulario_qualified_sim,
+        "opportunities_added": site_opportunities_added + instagram_opportunities_added + formulario_opportunities_added,
         "site_opportunities_added": site_opportunities_added,
         "instagram_opportunities_added": instagram_opportunities_added,
+        "formulario_opportunities_added": formulario_opportunities_added,
         "opportunities_skipped": opportunities_skipped,
         "leads_rows": len(df_leads),
         "instagram_rows": len(df_instagram),
+        "formulario_rows": len(df_formulario),
         "smark_rows": len(df_smark),
         "base_email_col": base_email_col,
     }
@@ -826,9 +905,15 @@ def load_sheet(company_slug: str, sheet_name: str) -> pd.DataFrame:
         else:
             df["data_hora"] = pd.NaT
 
-        # Carrega data_encerramento como coluna de data para filtro de Negócios Efetuados
-        if "data_encerramento" in df.columns:
-            df["data_encerramento_parsed"] = pd.to_datetime(df["data_encerramento"], dayfirst=True, errors="coerce")
+        # Carrega data de encerramento como coluna de data para filtro de Negócios Efetuados
+        data_encerramento_col = None
+        if "data encerramento" in df.columns:
+            data_encerramento_col = "data encerramento"
+        elif "data_encerramento" in df.columns:
+            data_encerramento_col = "data_encerramento"
+
+        if data_encerramento_col:
+            df["data_encerramento_parsed"] = pd.to_datetime(df[data_encerramento_col], dayfirst=True, errors="coerce")
         else:
             df["data_encerramento_parsed"] = pd.NaT
     else:
@@ -1774,7 +1859,8 @@ if send_smark_clicked:
                     st.session_state["sync_message"] = (
                         f"CSV enviado com sucesso ({upload_result['rows']} linhas) para {company['nome']}. "
                         f"Matches site: {sync_result['site_matches']}. "
-                        f"Matches Instagram: {sync_result['instagram_matches']}. "
+                        f"Matches Meta WhatsApp: {sync_result['instagram_matches']}. "
+                        f"Matches Meta Formulário: {sync_result['formulario_matches']}. "
                         f"Oportunidades regravadas: {sync_result['opportunities_added']}."
                     )
                     st.session_state["open_upload_panel"] = False
