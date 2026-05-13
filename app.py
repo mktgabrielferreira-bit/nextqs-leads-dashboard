@@ -172,6 +172,13 @@ def normalize_origin(value) -> str:
     return text if text else "Origem não identificada"
 
 
+def normalize_campaign(value) -> str:
+    text = normalize_text(value)
+    if text.lower() in {"", "none", "null", "nan", "undefined", "false", "{campaignname}", "(not set)", "(notset)"}:
+        return "Campanha não identificada"
+    return text
+
+
 def get_today_local() -> date:
     try:
         return datetime.now(ZoneInfo("America/Sao_Paulo")).date()
@@ -1369,40 +1376,99 @@ def build_origin_table(
     return df_out.sort_values(["Leads", "Oportunidades", "Negócios"], ascending=False).reset_index(drop=True)
 
 
+def prepare_leads_for_campaign_reporting(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["Campanha", "lead_key"])
+
+    out = df.copy()
+    if "utm_campaign" not in out.columns:
+        out["utm_campaign"] = None
+    if "campanha" not in out.columns:
+        out["campanha"] = None
+
+    utm_campaign = out["utm_campaign"].apply(normalize_campaign)
+    campanha = out["campanha"].apply(normalize_campaign)
+    out["Campanha"] = utm_campaign.where(utm_campaign != "Campanha não identificada", campanha)
+    out["lead_key"] = out.apply(build_unique_lead_key_from_row, axis=1)
+
+    missing_mask = out["lead_key"].eq("")
+    if missing_mask.any():
+        out.loc[missing_mask, "lead_key"] = [f"sem_id_{idx}" for idx in out[missing_mask].index]
+
+    return out[["Campanha", "lead_key"]]
+
+
+def build_campaign_counts_from_opportunities(df: pd.DataFrame, count_col: str) -> pd.DataFrame:
+    if df.empty or "campanha" not in df.columns:
+        return pd.DataFrame(columns=["Campanha", count_col])
+
+    out = df.copy()
+    out["Campanha"] = out["campanha"].apply(normalize_campaign)
+    out = out[out["Campanha"] != "Campanha não identificada"].copy()
+
+    if out.empty:
+        return pd.DataFrame(columns=["Campanha", count_col])
+
+    return out.groupby("Campanha").size().reset_index(name=count_col)
+
+
 def build_campaign_table(
     df_leads_filtrado: pd.DataFrame,
     df_opp_full: pd.DataFrame,
+    extra_leads_dfs: list[pd.DataFrame] | None = None,
+    df_opportunities_periodo: pd.DataFrame | None = None,
+    df_negocios_periodo: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Cria tabela de campanhas com colunas: Campanha, Leads, Oportunidades, Negócios.
     """
-    df_c = df_leads_filtrado[df_leads_filtrado["utm_campaign"] != "Campanha não identificada"].copy()
-    if df_c.empty:
+    lead_frames = []
+    for df in [df_leads_filtrado] + (extra_leads_dfs or []):
+        prepared = prepare_leads_for_campaign_reporting(df)
+        if not prepared.empty:
+            lead_frames.append(prepared)
+
+    if lead_frames:
+        df_c = pd.concat(lead_frames, ignore_index=True)
+        df_c = df_c[df_c["Campanha"] != "Campanha não identificada"].copy()
+        leads_por_camp = df_c.groupby("Campanha").size().reset_index(name="Leads")
+    else:
+        leads_por_camp = pd.DataFrame(columns=["Campanha", "Leads"])
+
+    if df_opportunities_periodo is not None:
+        opp_por_camp = build_campaign_counts_from_opportunities(df_opportunities_periodo, "Oportunidades")
+    else:
+        opp_por_camp = build_campaign_counts_from_opportunities(df_opp_full, "Oportunidades")
+
+    if df_negocios_periodo is not None:
+        neg_por_camp = build_campaign_counts_from_opportunities(df_negocios_periodo, "Negócios")
+    else:
+        neg_df = df_opp_full[df_opp_full["status_funil"].str.strip().str.lower() == "negócio efetuado"] if (not df_opp_full.empty and "status_funil" in df_opp_full.columns) else pd.DataFrame()
+        neg_por_camp = build_campaign_counts_from_opportunities(neg_df, "Negócios")
+
+    if leads_por_camp.empty and opp_por_camp.empty and neg_por_camp.empty:
         return pd.DataFrame()
 
-    leads_por_camp = df_c.groupby("utm_campaign").size().reset_index(name="Leads")
-    leads_por_camp = leads_por_camp.rename(columns={"utm_campaign": "Campanha"})
+    df_out = leads_por_camp.copy()
+    if df_out.empty:
+        df_out = pd.DataFrame(columns=["Campanha", "Leads"])
 
-    # Oportunidades por campanha: join via user_id_email
-    if not df_opp_full.empty and "user_id" in df_opp_full.columns and "user_id_email" in df_c.columns:
-        opp_user_ids = set(df_opp_full["user_id"].dropna().astype(str).str.strip().str.lower())
-        neg_df = df_opp_full[df_opp_full["status_funil"].str.strip().str.lower() == "negócio efetuado"] if "status_funil" in df_opp_full.columns else pd.DataFrame()
-        neg_user_ids = set(neg_df["user_id"].dropna().astype(str).str.strip().str.lower()) if not neg_df.empty else set()
-
-        opp_counts = []
-        neg_counts = []
-        for _, row in leads_por_camp.iterrows():
-            camp_leads = df_c[df_c["utm_campaign"] == row["Campanha"]]
-            emails = set(camp_leads["user_id_email"].dropna().astype(str).str.strip().str.lower())
-            opp_counts.append(len(emails & opp_user_ids))
-            neg_counts.append(len(emails & neg_user_ids))
-        leads_por_camp["Oportunidades"] = opp_counts
-        leads_por_camp["Negócios"] = neg_counts
+    if not opp_por_camp.empty:
+        df_out = df_out.merge(opp_por_camp, on="Campanha", how="outer")
     else:
-        leads_por_camp["Oportunidades"] = 0
-        leads_por_camp["Negócios"] = 0
+        df_out["Oportunidades"] = 0
 
-    return leads_por_camp.sort_values("Leads", ascending=False).reset_index(drop=True)
+    if not neg_por_camp.empty:
+        df_out = df_out.merge(neg_por_camp, on="Campanha", how="outer")
+    else:
+        df_out["Negócios"] = 0
+
+    for col in ["Leads", "Oportunidades", "Negócios"]:
+        if col not in df_out.columns:
+            df_out[col] = 0
+        df_out[col] = df_out[col].fillna(0).astype(int)
+
+    return df_out.sort_values(["Leads", "Oportunidades", "Negócios"], ascending=False).reset_index(drop=True)
 
 
 def build_terms_table(
@@ -1461,8 +1527,13 @@ def render_normal_mode(
     df_filtrado = apply_extra_filters_leads(df_periodo_leads, eventos_sel, origens_sel, dispositivos_sel)
     df_leads_meta_whatsapp_periodo = get_period_filtered_df(dfs.get("leads_meta_whatsapp", pd.DataFrame()), periodo_sel, hoje, ontem)
     df_leads_meta_whatsapp_filtrado = apply_common_filters(df_leads_meta_whatsapp_periodo, origens_sel, dispositivos_sel)
+    df_leads_meta_formulario_periodo = get_period_filtered_df(dfs.get("leads_meta_formulario", pd.DataFrame()), periodo_sel, hoje, ontem)
+    df_leads_meta_formulario_filtrado = apply_common_filters(df_leads_meta_formulario_periodo, origens_sel, dispositivos_sel)
 
-    if df_filtrado.empty and (company_slug != "nextqs" or df_leads_meta_whatsapp_filtrado.empty):
+    if df_filtrado.empty and (
+        company_slug != "nextqs"
+        or (df_leads_meta_whatsapp_filtrado.empty and df_leads_meta_formulario_filtrado.empty)
+    ):
         st.warning("Nenhum Lead encontrado para o período selecionado (após filtros).")
         st.stop()
 
@@ -1556,7 +1627,19 @@ def render_normal_mode(
         st.dataframe(df_origem_table, use_container_width=True, height=320)
 
     st.markdown("### Informações por Campanhas")
-    df_camp_table = build_campaign_table(df_filtrado, df_opp_full)
+    extra_campaign_leads = []
+    if not df_leads_meta_whatsapp_filtrado.empty:
+        extra_campaign_leads.append(df_leads_meta_whatsapp_filtrado)
+    if not df_leads_meta_formulario_filtrado.empty:
+        extra_campaign_leads.append(df_leads_meta_formulario_filtrado)
+
+    df_camp_table = build_campaign_table(
+        df_filtrado,
+        df_opp_full,
+        extra_leads_dfs=extra_campaign_leads,
+        df_opportunities_periodo=df_periodo_opportunities,
+        df_negocios_periodo=df_negocios_periodo,
+    )
     if df_camp_table.empty:
         st.info("Nenhuma campanha válida encontrada no período filtrado.")
     else:
@@ -1970,7 +2053,12 @@ elif periodo_sel == "Comparar meses":
         trigger_sheet_reload()
 
 if not compare_mode:
-    if df_periodo_leads.empty:
+    df_periodo_leads_meta_whatsapp_empty_check = get_period_filtered_df(dfs.get("leads_meta_whatsapp", pd.DataFrame()), periodo_sel, hoje, ontem)
+    df_periodo_leads_meta_formulario_empty_check = get_period_filtered_df(dfs.get("leads_meta_formulario", pd.DataFrame()), periodo_sel, hoje, ontem)
+    if df_periodo_leads.empty and (
+        company_slug != "nextqs"
+        or (df_periodo_leads_meta_whatsapp_empty_check.empty and df_periodo_leads_meta_formulario_empty_check.empty)
+    ):
         st.warning("Nenhum Lead encontrado para o período selecionado.")
         st.stop()
 
@@ -1990,12 +2078,23 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
                 filter_by_year_month(df_instagram_full, st.session_state["compare_ano"], m2_num),
             ]
         )
+    df_formulario_full = dfs.get("leads_meta_formulario", pd.DataFrame())
+    if company_slug == "nextqs" and not df_formulario_full.empty:
+        df_filter_frames.extend(
+            [
+                filter_by_year_month(df_formulario_full, st.session_state["compare_ano"], m1_num),
+                filter_by_year_month(df_formulario_full, st.session_state["compare_ano"], m2_num),
+            ]
+        )
     df_for_filters = pd.concat(df_filter_frames, ignore_index=True).sort_values("data_hora")
 else:
     df_filter_frames = [df_periodo_leads]
     df_periodo_leads_meta_whatsapp_sidebar = get_period_filtered_df(dfs.get("leads_meta_whatsapp", pd.DataFrame()), periodo_sel, hoje, ontem)
     if company_slug == "nextqs" and not df_periodo_leads_meta_whatsapp_sidebar.empty:
         df_filter_frames.append(df_periodo_leads_meta_whatsapp_sidebar)
+    df_periodo_leads_meta_formulario_sidebar = get_period_filtered_df(dfs.get("leads_meta_formulario", pd.DataFrame()), periodo_sel, hoje, ontem)
+    if company_slug == "nextqs" and not df_periodo_leads_meta_formulario_sidebar.empty:
+        df_filter_frames.append(df_periodo_leads_meta_formulario_sidebar)
     df_for_filters = pd.concat(df_filter_frames, ignore_index=True).sort_values("data_hora")
 
 eventos = sorted(df_for_filters["evento"].dropna().unique().tolist()) if "evento" in df_for_filters.columns else []
