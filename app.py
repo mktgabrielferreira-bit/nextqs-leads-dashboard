@@ -51,7 +51,7 @@ SHEETS_REQUIRED = [
 
 OPTIONAL_SHEETS = [
     "oportunidades",
-    "leads_instagram",
+    "leads_meta_whatsapp",
 ]
 
 MESES_LABEL = {
@@ -552,10 +552,10 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
     opportunities_ws = get_or_create_worksheet(base_spreadsheet, OPPORTUNITIES_SHEET_NAME)
 
     try:
-        leads_instagram_ws = base_spreadsheet.worksheet("leads_instagram")
-        instagram_records = leads_instagram_ws.get_all_records()
+        leads_meta_whatsapp_ws = base_spreadsheet.worksheet("leads_meta_whatsapp")
+        instagram_records = leads_meta_whatsapp_ws.get_all_records()
     except gspread.exceptions.WorksheetNotFound:
-        leads_instagram_ws = None
+        leads_meta_whatsapp_ws = None
         instagram_records = []
 
     leads_records = leads_ws.get_all_records()
@@ -611,18 +611,18 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
     else:
         base_email_col = None
 
-    if leads_instagram_ws is not None and not df_instagram.empty:
+    if leads_meta_whatsapp_ws is not None and not df_instagram.empty:
         required_instagram_columns = ["telefone", "user_id_cel", "data"]
         missing_instagram = [col for col in required_instagram_columns if col not in df_instagram.columns]
         if missing_instagram:
-            raise ValueError("A aba 'leads_instagram' não possui as colunas obrigatórias: " + ", ".join(missing_instagram))
+            raise ValueError("A aba 'leads_meta_whatsapp' não possui as colunas obrigatórias: " + ", ".join(missing_instagram))
 
     ensure_column_exists(leads_ws, BASE_QUALIFIED_COLUMN)
     ensure_headers_exist(opportunities_ws, opp_required_headers)
 
     instagram_header_map = {}
-    if leads_instagram_ws is not None:
-        instagram_header_map = ensure_headers_exist(leads_instagram_ws, ["qualificado", "consultor"])
+    if leads_meta_whatsapp_ws is not None:
+        instagram_header_map = ensure_headers_exist(leads_meta_whatsapp_ws, ["qualificado", "consultor"])
 
     smark_email_map = build_smark_email_map(smark_records)
     smark_phone_map = build_smark_phone_map(smark_records)
@@ -719,17 +719,17 @@ def sync_opportunities_with_smark(company_slug: str, smark_records_override: lis
         instagram_qualified_values.append([target_value])
         instagram_consultor_values.append([consultor_value])
 
-    if leads_instagram_ws is not None and instagram_records:
+    if leads_meta_whatsapp_ws is not None and instagram_records:
         qual_col_idx = instagram_header_map["qualificado"]
         consultor_col_idx = instagram_header_map["consultor"]
 
         qual_col_letter = gspread.utils.rowcol_to_a1(1, qual_col_idx)[:-1]
         qual_range = f"{qual_col_letter}2:{qual_col_letter}{len(instagram_qualified_values) + 1}"
-        leads_instagram_ws.update(qual_range, instagram_qualified_values, value_input_option="USER_ENTERED")
+        leads_meta_whatsapp_ws.update(qual_range, instagram_qualified_values, value_input_option="USER_ENTERED")
 
         consultor_col_letter = gspread.utils.rowcol_to_a1(1, consultor_col_idx)[:-1]
         consultor_range = f"{consultor_col_letter}2:{consultor_col_letter}{len(instagram_consultor_values) + 1}"
-        leads_instagram_ws.update(consultor_range, instagram_consultor_values, value_input_option="USER_ENTERED")
+        leads_meta_whatsapp_ws.update(consultor_range, instagram_consultor_values, value_input_option="USER_ENTERED")
 
     opportunities_headers = opportunities_ws.row_values(1)
     if not opportunities_headers:
@@ -1014,18 +1014,18 @@ def get_leads_count_for_funnel(
     company_slug: str,
     dfs: dict,
     df_periodo_leads_site: pd.DataFrame,
-    df_periodo_leads_instagram: pd.DataFrame | None,
+    df_periodo_leads_meta_whatsapp: pd.DataFrame | None,
 ) -> int:
     """
-    NextQS: leads_site + leads_instagram sem duplicações (por email/user_id_email).
+    NextQS: leads_site + leads_meta_whatsapp sem duplicações (por email/user_id_email).
     StarLed: apenas leads_site sem duplicações.
     """
     if company_slug == "nextqs":
         frames = []
         if not df_periodo_leads_site.empty:
             frames.append(df_periodo_leads_site)
-        if df_periodo_leads_instagram is not None and not df_periodo_leads_instagram.empty:
-            frames.append(df_periodo_leads_instagram)
+        if df_periodo_leads_meta_whatsapp is not None and not df_periodo_leads_meta_whatsapp.empty:
+            frames.append(df_periodo_leads_meta_whatsapp)
         if not frames:
             return 0
         combined = pd.concat(frames, ignore_index=True)
@@ -1107,7 +1107,7 @@ def render_central_funnel(
     company_slug: str,
     dfs: dict,
     df_leads_site_periodo: pd.DataFrame,
-    df_leads_instagram_periodo: pd.DataFrame | None,
+    df_leads_meta_whatsapp_periodo: pd.DataFrame | None,
     df_opportunities_periodo: pd.DataFrame,
     df_opp_full: pd.DataFrame,
     periodo_sel: str,
@@ -1115,7 +1115,7 @@ def render_central_funnel(
     ontem: date,
     title: str = "Funil",
 ):
-    leads_count = get_leads_count_for_funnel(company_slug, dfs, df_leads_site_periodo, df_leads_instagram_periodo)
+    leads_count = get_leads_count_for_funnel(company_slug, dfs, df_leads_site_periodo, df_leads_meta_whatsapp_periodo)
     opp_count = len(df_opportunities_periodo) if not df_opportunities_periodo.empty else 0
     negocios_count = get_negocios_efetuados_count(df_opp_full, periodo_sel, hoje, ontem)
 
@@ -1133,14 +1133,14 @@ def render_central_funnel_compare(
     company_slug: str,
     dfs: dict,
     df_leads_site_periodo: pd.DataFrame,
-    df_leads_instagram_periodo: pd.DataFrame | None,
+    df_leads_meta_whatsapp_periodo: pd.DataFrame | None,
     df_opportunities_periodo: pd.DataFrame,
     df_opp_full: pd.DataFrame,
     ano: int,
     mes_num: int,
     title: str = "Funil",
 ):
-    leads_count = get_leads_count_for_funnel(company_slug, dfs, df_leads_site_periodo, df_leads_instagram_periodo)
+    leads_count = get_leads_count_for_funnel(company_slug, dfs, df_leads_site_periodo, df_leads_meta_whatsapp_periodo)
     opp_count = len(df_opportunities_periodo) if not df_opportunities_periodo.empty else 0
     negocios_count = get_negocios_efetuados_count_by_month(df_opp_full, ano, mes_num)
 
@@ -1224,7 +1224,7 @@ def get_negocios_efetuados_df(df_opp_full: pd.DataFrame, periodo_sel: str, hoje:
 def build_origin_table(
     company_slug: str,
     df_leads_site: pd.DataFrame,
-    df_leads_instagram: pd.DataFrame | None,
+    df_leads_meta_whatsapp: pd.DataFrame | None,
     df_opportunities_periodo: pd.DataFrame,
     df_negocios_periodo: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -1233,8 +1233,8 @@ def build_origin_table(
     if not df_leads_site.empty:
         leads_frames.append(prepare_leads_for_reporting(df_leads_site))
 
-    if company_slug == "nextqs" and df_leads_instagram is not None and not df_leads_instagram.empty:
-        leads_frames.append(prepare_leads_for_reporting(df_leads_instagram))
+    if company_slug == "nextqs" and df_leads_meta_whatsapp is not None and not df_leads_meta_whatsapp.empty:
+        leads_frames.append(prepare_leads_for_reporting(df_leads_meta_whatsapp))
 
     if leads_frames:
         df_leads_combined = pd.concat(leads_frames, ignore_index=True)
@@ -1374,10 +1374,10 @@ def render_normal_mode(
     ontem,
 ):
     df_filtrado = apply_extra_filters_leads(df_periodo_leads, eventos_sel, origens_sel, dispositivos_sel)
-    df_leads_instagram_periodo = get_period_filtered_df(dfs.get("leads_instagram", pd.DataFrame()), periodo_sel, hoje, ontem)
-    df_leads_instagram_filtrado = apply_common_filters(df_leads_instagram_periodo, origens_sel, dispositivos_sel)
+    df_leads_meta_whatsapp_periodo = get_period_filtered_df(dfs.get("leads_meta_whatsapp", pd.DataFrame()), periodo_sel, hoje, ontem)
+    df_leads_meta_whatsapp_filtrado = apply_common_filters(df_leads_meta_whatsapp_periodo, origens_sel, dispositivos_sel)
 
-    if df_filtrado.empty and (company_slug != "nextqs" or df_leads_instagram_filtrado.empty):
+    if df_filtrado.empty and (company_slug != "nextqs" or df_leads_meta_whatsapp_filtrado.empty):
         st.warning("Nenhum Lead encontrado para o período selecionado (após filtros).")
         st.stop()
 
@@ -1415,7 +1415,7 @@ def render_normal_mode(
         company_slug,
         dfs,
         df_periodo_leads,
-        df_leads_instagram_periodo if not df_leads_instagram_periodo.empty else None,
+        df_leads_meta_whatsapp_periodo if not df_leads_meta_whatsapp_periodo.empty else None,
         df_periodo_opportunities,
         df_opp_full,
         periodo_sel,
@@ -1459,7 +1459,7 @@ def render_normal_mode(
     df_origem_table = build_origin_table(
         company_slug,
         df_filtrado,
-        df_leads_instagram_filtrado if not df_leads_instagram_filtrado.empty else None,
+        df_leads_meta_whatsapp_filtrado if not df_leads_meta_whatsapp_filtrado.empty else None,
         df_periodo_opportunities,
         df_negocios_periodo,
     )
@@ -1560,7 +1560,7 @@ def render_compare_mode(
     tab_f1, tab_f2 = st.tabs([f"{m1_label}/{ano_sel}", f"{m2_label}/{ano_sel}"])
 
     # Instagram para compare mode
-    df_instagram_full = dfs.get("leads_instagram", pd.DataFrame())
+    df_instagram_full = dfs.get("leads_meta_whatsapp", pd.DataFrame())
     df_ig_m1 = filter_by_year_month(df_instagram_full, ano_sel, m1_num) if not df_instagram_full.empty else pd.DataFrame()
     df_ig_m2 = filter_by_year_month(df_instagram_full, ano_sel, m2_num) if not df_instagram_full.empty else pd.DataFrame()
 
@@ -1896,7 +1896,7 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
         filter_by_year_month(df_leads, st.session_state["compare_ano"], m1_num),
         filter_by_year_month(df_leads, st.session_state["compare_ano"], m2_num),
     ]
-    df_instagram_full = dfs.get("leads_instagram", pd.DataFrame())
+    df_instagram_full = dfs.get("leads_meta_whatsapp", pd.DataFrame())
     if company_slug == "nextqs" and not df_instagram_full.empty:
         df_filter_frames.extend(
             [
@@ -1907,9 +1907,9 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
     df_for_filters = pd.concat(df_filter_frames, ignore_index=True).sort_values("data_hora")
 else:
     df_filter_frames = [df_periodo_leads]
-    df_periodo_leads_instagram_sidebar = get_period_filtered_df(dfs.get("leads_instagram", pd.DataFrame()), periodo_sel, hoje, ontem)
-    if company_slug == "nextqs" and not df_periodo_leads_instagram_sidebar.empty:
-        df_filter_frames.append(df_periodo_leads_instagram_sidebar)
+    df_periodo_leads_meta_whatsapp_sidebar = get_period_filtered_df(dfs.get("leads_meta_whatsapp", pd.DataFrame()), periodo_sel, hoje, ontem)
+    if company_slug == "nextqs" and not df_periodo_leads_meta_whatsapp_sidebar.empty:
+        df_filter_frames.append(df_periodo_leads_meta_whatsapp_sidebar)
     df_for_filters = pd.concat(df_filter_frames, ignore_index=True).sort_values("data_hora")
 
 eventos = sorted(df_for_filters["evento"].dropna().unique().tolist()) if "evento" in df_for_filters.columns else []
