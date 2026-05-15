@@ -1000,6 +1000,110 @@ def apply_common_filters(df_base: pd.DataFrame, origens_sel, dispositivos_sel) -
     return df_out
 
 
+def concat_non_empty(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    valid_frames = [df for df in frames if df is not None and not df.empty]
+    if not valid_frames:
+        return pd.DataFrame()
+    return pd.concat(valid_frames, ignore_index=True)
+
+
+def is_meta_origin(value) -> bool:
+    text = normalize_text(value).lower()
+    return any(token in text for token in ["meta", "instagram", "facebook", "fb ads"])
+
+
+def is_google_ads_origin(value) -> bool:
+    text = normalize_text(value).lower()
+    return any(token in text for token in ["google ads", "adwords", "google / cpc", "google-cpc", "google cpc"])
+
+
+def count_unique_leads(df: pd.DataFrame) -> int:
+    if df is None or df.empty:
+        return 0
+    prepared = prepare_leads_for_reporting(df)
+    if prepared.empty or "lead_key" not in prepared.columns:
+        return 0
+    return int(prepared["lead_key"].nunique())
+
+
+def count_unique_leads_by(df: pd.DataFrame, group_cols: list[str], count_name: str = "leads") -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=group_cols + [count_name])
+
+    prepared = prepare_leads_for_reporting(df)
+    if prepared.empty:
+        return pd.DataFrame(columns=group_cols + [count_name])
+
+    for col in group_cols:
+        if col not in prepared.columns:
+            prepared[col] = None
+
+    prepared = prepared.dropna(subset=group_cols).copy()
+    if prepared.empty:
+        return pd.DataFrame(columns=group_cols + [count_name])
+
+    return (
+        prepared.drop_duplicates(subset=group_cols + ["lead_key"])
+        .groupby(group_cols)["lead_key"]
+        .nunique()
+        .reset_index(name=count_name)
+    )
+
+
+def build_combined_leads(
+    company_slug: str,
+    df_leads_site: pd.DataFrame,
+    df_leads_meta_whatsapp: pd.DataFrame | None = None,
+    df_leads_meta_formulario: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    frames = [df_leads_site]
+    if company_slug == "nextqs":
+        frames.extend([df_leads_meta_whatsapp, df_leads_meta_formulario])
+    return concat_non_empty(frames)
+
+
+def get_highlight_kpis(
+    company_slug: str,
+    df_leads_site: pd.DataFrame,
+    df_leads_meta_whatsapp: pd.DataFrame | None = None,
+    df_leads_meta_formulario: pd.DataFrame | None = None,
+) -> tuple[int, int, int]:
+    source_frames = []
+
+    if df_leads_site is not None and not df_leads_site.empty:
+        df_site = df_leads_site.copy()
+        df_site["_lead_source"] = "leads_site"
+        source_frames.append(df_site)
+
+    if company_slug == "nextqs":
+        if df_leads_meta_whatsapp is not None and not df_leads_meta_whatsapp.empty:
+            df_whatsapp = df_leads_meta_whatsapp.copy()
+            df_whatsapp["_lead_source"] = "leads_meta_whatsapp"
+            source_frames.append(df_whatsapp)
+        if df_leads_meta_formulario is not None and not df_leads_meta_formulario.empty:
+            df_formulario = df_leads_meta_formulario.copy()
+            df_formulario["_lead_source"] = "leads_meta_formulario"
+            source_frames.append(df_formulario)
+
+    combined = concat_non_empty(source_frames)
+    if combined.empty:
+        return 0, 0, 0
+
+    leads_totais = count_unique_leads(combined)
+
+    meta_mask = combined["_lead_source"].isin(["leads_meta_whatsapp", "leads_meta_formulario"])
+    if "origem" in combined.columns:
+        meta_mask = meta_mask | combined["origem"].apply(is_meta_origin)
+        google_mask = combined["origem"].apply(is_google_ads_origin)
+    else:
+        google_mask = pd.Series(False, index=combined.index)
+
+    leads_meta = count_unique_leads(combined[meta_mask].copy())
+    leads_google_ads = count_unique_leads(combined[google_mask].copy())
+
+    return leads_totais, leads_meta, leads_google_ads
+
+
 def get_kpis(df_kpi: pd.DataFrame):
     conv_total = len(df_kpi)
     usuarios_unicos = df_kpi["user_id_email"].nunique() if (not df_kpi.empty and "user_id_email" in df_kpi.columns) else 0
@@ -1107,35 +1211,19 @@ def get_leads_count_for_funnel(
     dfs: dict,
     df_periodo_leads_site: pd.DataFrame,
     df_periodo_leads_meta_whatsapp: pd.DataFrame | None,
+    df_periodo_leads_meta_formulario: pd.DataFrame | None = None,
 ) -> int:
     """
-    NextQS: leads_site + leads_meta_whatsapp sem duplicações (por email/user_id_email).
+    NextQS: leads_site + leads_meta_whatsapp + leads_meta_formulario sem duplicações.
     StarLed: apenas leads_site sem duplicações.
     """
-    if company_slug == "nextqs":
-        frames = []
-        if not df_periodo_leads_site.empty:
-            frames.append(df_periodo_leads_site)
-        if df_periodo_leads_meta_whatsapp is not None and not df_periodo_leads_meta_whatsapp.empty:
-            frames.append(df_periodo_leads_meta_whatsapp)
-        if not frames:
-            return 0
-        combined = pd.concat(frames, ignore_index=True)
-        # Deduplicação por user_id_email quando disponível
-        if "user_id_email" in combined.columns:
-            unique_emails = combined["user_id_email"].dropna().nunique()
-            sem_email = combined["user_id_email"].isna().sum()
-            return unique_emails + sem_email
-        return len(combined)
-    else:
-        # StarLed: apenas leads_site
-        if df_periodo_leads_site.empty:
-            return 0
-        if "user_id_email" in df_periodo_leads_site.columns:
-            unique_emails = df_periodo_leads_site["user_id_email"].dropna().nunique()
-            sem_email = df_periodo_leads_site["user_id_email"].isna().sum()
-            return unique_emails + sem_email
-        return len(df_periodo_leads_site)
+    combined = build_combined_leads(
+        company_slug,
+        df_periodo_leads_site,
+        df_periodo_leads_meta_whatsapp,
+        df_periodo_leads_meta_formulario,
+    )
+    return count_unique_leads(combined)
 
 
 def get_negocios_efetuados_count(df_opp_full: pd.DataFrame, periodo_sel: str, hoje: date, ontem: date) -> int:
@@ -1200,6 +1288,7 @@ def render_central_funnel(
     dfs: dict,
     df_leads_site_periodo: pd.DataFrame,
     df_leads_meta_whatsapp_periodo: pd.DataFrame | None,
+    df_leads_meta_formulario_periodo: pd.DataFrame | None,
     df_opportunities_periodo: pd.DataFrame,
     df_opp_full: pd.DataFrame,
     periodo_sel: str,
@@ -1207,7 +1296,13 @@ def render_central_funnel(
     ontem: date,
     title: str = "Funil",
 ):
-    leads_count = get_leads_count_for_funnel(company_slug, dfs, df_leads_site_periodo, df_leads_meta_whatsapp_periodo)
+    leads_count = get_leads_count_for_funnel(
+        company_slug,
+        dfs,
+        df_leads_site_periodo,
+        df_leads_meta_whatsapp_periodo,
+        df_leads_meta_formulario_periodo,
+    )
     opp_count = len(df_opportunities_periodo) if not df_opportunities_periodo.empty else 0
     negocios_count = get_negocios_efetuados_count(df_opp_full, periodo_sel, hoje, ontem)
 
@@ -1226,13 +1321,20 @@ def render_central_funnel_compare(
     dfs: dict,
     df_leads_site_periodo: pd.DataFrame,
     df_leads_meta_whatsapp_periodo: pd.DataFrame | None,
+    df_leads_meta_formulario_periodo: pd.DataFrame | None,
     df_opportunities_periodo: pd.DataFrame,
     df_opp_full: pd.DataFrame,
     ano: int,
     mes_num: int,
     title: str = "Funil",
 ):
-    leads_count = get_leads_count_for_funnel(company_slug, dfs, df_leads_site_periodo, df_leads_meta_whatsapp_periodo)
+    leads_count = get_leads_count_for_funnel(
+        company_slug,
+        dfs,
+        df_leads_site_periodo,
+        df_leads_meta_whatsapp_periodo,
+        df_leads_meta_formulario_periodo,
+    )
     opp_count = len(df_opportunities_periodo) if not df_opportunities_periodo.empty else 0
     negocios_count = get_negocios_efetuados_count_by_month(df_opp_full, ano, mes_num)
 
@@ -1280,6 +1382,16 @@ def prepare_leads_for_reporting(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def get_opportunity_lead_keys(df: pd.DataFrame) -> set[str]:
+    if df is None or df.empty or "user_id" not in df.columns:
+        return set()
+    return {
+        normalize_text(value).lower()
+        for value in df["user_id"].dropna()
+        if normalize_text(value)
+    }
+
+
 def get_negocios_efetuados_df(df_opp_full: pd.DataFrame, periodo_sel: str, hoje: date, ontem: date) -> pd.DataFrame:
     if df_opp_full.empty or "status_funil" not in df_opp_full.columns:
         return pd.DataFrame(columns=df_opp_full.columns if not df_opp_full.empty else [])
@@ -1317,63 +1429,39 @@ def build_origin_table(
     company_slug: str,
     df_leads_site: pd.DataFrame,
     df_leads_meta_whatsapp: pd.DataFrame | None,
+    df_leads_meta_formulario: pd.DataFrame | None,
     df_opportunities_periodo: pd.DataFrame,
     df_negocios_periodo: pd.DataFrame,
 ) -> pd.DataFrame:
     leads_frames = []
 
     if not df_leads_site.empty:
-        leads_frames.append(prepare_leads_for_reporting(df_leads_site))
+        leads_frames.append(df_leads_site)
 
     if company_slug == "nextqs" and df_leads_meta_whatsapp is not None and not df_leads_meta_whatsapp.empty:
-        leads_frames.append(prepare_leads_for_reporting(df_leads_meta_whatsapp))
+        leads_frames.append(df_leads_meta_whatsapp)
+
+    if company_slug == "nextqs" and df_leads_meta_formulario is not None and not df_leads_meta_formulario.empty:
+        leads_frames.append(df_leads_meta_formulario)
 
     if leads_frames:
-        df_leads_combined = pd.concat(leads_frames, ignore_index=True)
-        leads_por_origem = (
-            df_leads_combined.drop_duplicates(subset=["origem", "lead_key"])
-            .groupby("origem")["lead_key"]
-            .nunique()
-            .reset_index(name="Leads")
+        df_leads_combined = prepare_leads_for_reporting(pd.concat(leads_frames, ignore_index=True))
+        unique_leads = df_leads_combined.drop_duplicates(subset=["origem", "lead_key"]).copy()
+        opp_keys = get_opportunity_lead_keys(df_opportunities_periodo)
+        neg_keys = get_opportunity_lead_keys(df_negocios_periodo)
+
+        unique_leads["Oportunidades"] = unique_leads["lead_key"].isin(opp_keys).astype(int)
+        unique_leads["Negocios"] = unique_leads["lead_key"].isin(neg_keys).astype(int)
+
+        df_out = (
+            unique_leads.groupby("origem")
+            .agg(Leads=("lead_key", "nunique"), Oportunidades=("Oportunidades", "sum"), Negocios=("Negocios", "sum"))
+            .reset_index()
+            .rename(columns={"origem": "Origem", "Negocios": "Negócios"})
         )
+        return df_out.sort_values(["Leads", "Oportunidades", "Negócios"], ascending=False).reset_index(drop=True)
     else:
-        leads_por_origem = pd.DataFrame(columns=["origem", "Leads"])
-
-    if not df_opportunities_periodo.empty:
-        df_opp = df_opportunities_periodo.copy()
-        df_opp["origem"] = df_opp.get("origem", pd.Series(index=df_opp.index, dtype="object")).apply(normalize_origin)
-        opp_por_origem = df_opp.groupby("origem").size().reset_index(name="Oportunidades")
-    else:
-        opp_por_origem = pd.DataFrame(columns=["origem", "Oportunidades"])
-
-    if not df_negocios_periodo.empty:
-        df_neg = df_negocios_periodo.copy()
-        df_neg["origem"] = df_neg.get("origem", pd.Series(index=df_neg.index, dtype="object")).apply(normalize_origin)
-        neg_por_origem = df_neg.groupby("origem").size().reset_index(name="Negócios")
-    else:
-        neg_por_origem = pd.DataFrame(columns=["origem", "Negócios"])
-
-    df_out = leads_por_origem.rename(columns={"origem": "Origem"})
-
-    if df_out.empty:
-        df_out = pd.DataFrame(columns=["Origem", "Leads"])
-
-    if not opp_por_origem.empty:
-        df_out = df_out.merge(opp_por_origem.rename(columns={"origem": "Origem"}), on="Origem", how="outer")
-    else:
-        df_out["Oportunidades"] = 0
-
-    if not neg_por_origem.empty:
-        df_out = df_out.merge(neg_por_origem.rename(columns={"origem": "Origem"}), on="Origem", how="outer")
-    else:
-        df_out["Negócios"] = 0
-
-    for col in ["Leads", "Oportunidades", "Negócios"]:
-        if col not in df_out.columns:
-            df_out[col] = 0
-        df_out[col] = df_out[col].fillna(0).astype(int)
-
-    return df_out.sort_values(["Leads", "Oportunidades", "Negócios"], ascending=False).reset_index(drop=True)
+        return pd.DataFrame(columns=["Origem", "Leads", "Oportunidades", "Negócios"])
 
 
 def prepare_leads_for_campaign_reporting(df: pd.DataFrame) -> pd.DataFrame:
@@ -1422,53 +1510,38 @@ def build_campaign_table(
     """
     Cria tabela de campanhas com colunas: Campanha, Leads, Oportunidades, Negócios.
     """
-    lead_frames = []
-    for df in [df_leads_filtrado] + (extra_leads_dfs or []):
-        prepared = prepare_leads_for_campaign_reporting(df)
-        if not prepared.empty:
-            lead_frames.append(prepared)
+    lead_frames = [df for df in [df_leads_filtrado] + (extra_leads_dfs or []) if df is not None and not df.empty]
 
-    if lead_frames:
-        df_c = pd.concat(lead_frames, ignore_index=True)
-        df_c = df_c[df_c["Campanha"] != "Campanha não identificada"].copy()
-        leads_por_camp = df_c.groupby("Campanha").size().reset_index(name="Leads")
-    else:
-        leads_por_camp = pd.DataFrame(columns=["Campanha", "Leads"])
-
-    if df_opportunities_periodo is not None:
-        opp_por_camp = build_campaign_counts_from_opportunities(df_opportunities_periodo, "Oportunidades")
-    else:
-        opp_por_camp = build_campaign_counts_from_opportunities(df_opp_full, "Oportunidades")
-
-    if df_negocios_periodo is not None:
-        neg_por_camp = build_campaign_counts_from_opportunities(df_negocios_periodo, "Negócios")
-    else:
-        neg_df = df_opp_full[df_opp_full["status_funil"].str.strip().str.lower() == "negócio efetuado"] if (not df_opp_full.empty and "status_funil" in df_opp_full.columns) else pd.DataFrame()
-        neg_por_camp = build_campaign_counts_from_opportunities(neg_df, "Negócios")
-
-    if leads_por_camp.empty and opp_por_camp.empty and neg_por_camp.empty:
+    if not lead_frames:
         return pd.DataFrame()
 
-    df_out = leads_por_camp.copy()
-    if df_out.empty:
-        df_out = pd.DataFrame(columns=["Campanha", "Leads"])
+    df_c_unique = prepare_leads_for_campaign_reporting(pd.concat(lead_frames, ignore_index=True))
+    df_c_unique = df_c_unique[df_c_unique["Campanha"] != "Campanha não identificada"].copy()
+    if df_c_unique.empty:
+        return pd.DataFrame()
 
-    if not opp_por_camp.empty:
-        df_out = df_out.merge(opp_por_camp, on="Campanha", how="outer")
-    else:
-        df_out["Oportunidades"] = 0
+    df_c_unique = df_c_unique.drop_duplicates(subset=["Campanha", "lead_key"]).copy()
+    opp_source = df_opportunities_periodo if df_opportunities_periodo is not None else df_opp_full
+    neg_source = df_negocios_periodo
+    if neg_source is None:
+        neg_source = (
+            df_opp_full[df_opp_full["status_funil"].str.strip().str.lower() == "negócio efetuado"]
+            if (not df_opp_full.empty and "status_funil" in df_opp_full.columns)
+            else pd.DataFrame()
+        )
 
-    if not neg_por_camp.empty:
-        df_out = df_out.merge(neg_por_camp, on="Campanha", how="outer")
-    else:
-        df_out["Negócios"] = 0
+    opp_keys = get_opportunity_lead_keys(opp_source)
+    neg_keys = get_opportunity_lead_keys(neg_source)
+    df_c_unique["Oportunidades"] = df_c_unique["lead_key"].isin(opp_keys).astype(int)
+    df_c_unique["Negocios"] = df_c_unique["lead_key"].isin(neg_keys).astype(int)
 
-    for col in ["Leads", "Oportunidades", "Negócios"]:
-        if col not in df_out.columns:
-            df_out[col] = 0
-        df_out[col] = df_out[col].fillna(0).astype(int)
-
-    return df_out.sort_values(["Leads", "Oportunidades", "Negócios"], ascending=False).reset_index(drop=True)
+    df_campaign_out = (
+        df_c_unique.groupby("Campanha")
+        .agg(Leads=("lead_key", "nunique"), Oportunidades=("Oportunidades", "sum"), Negocios=("Negocios", "sum"))
+        .reset_index()
+        .rename(columns={"Negocios": "Negócios"})
+    )
+    return df_campaign_out.sort_values(["Leads", "Oportunidades", "Negócios"], ascending=False).reset_index(drop=True)
 
 
 def build_terms_table(
@@ -1478,31 +1551,40 @@ def build_terms_table(
     """
     Cria tabela de termos de pesquisa com colunas: Palavra-chave, Leads, Oportunidades, Negócios.
     """
-    df_t = df_leads_filtrado[df_leads_filtrado["utm_term"] != "Palavra-chave não identificada"].copy()
-    if df_t.empty:
+    df_t_unique = prepare_leads_for_reporting(df_leads_filtrado)
+    if df_t_unique.empty or "utm_term" not in df_t_unique.columns:
         return pd.DataFrame()
 
-    leads_por_term = df_t.groupby("utm_term").size().reset_index(name="Leads")
-    leads_por_term = leads_por_term.rename(columns={"utm_term": "Palavra-chave"})
+    df_t_unique = df_t_unique[df_t_unique["utm_term"] != "Palavra-chave não identificada"].copy()
+    if df_t_unique.empty:
+        return pd.DataFrame()
 
-    if not df_opp_full.empty and "user_id" in df_opp_full.columns and "user_id_email" in df_t.columns:
-        opp_user_ids = set(df_opp_full["user_id"].dropna().astype(str).str.strip().str.lower())
-        neg_df = df_opp_full[df_opp_full["status_funil"].str.strip().str.lower() == "negócio efetuado"] if "status_funil" in df_opp_full.columns else pd.DataFrame()
-        neg_user_ids = set(neg_df["user_id"].dropna().astype(str).str.strip().str.lower()) if not neg_df.empty else set()
+    leads_por_term = (
+        df_t_unique.drop_duplicates(subset=["utm_term", "lead_key"])
+        .groupby("utm_term")["lead_key"]
+        .nunique()
+        .reset_index(name="Leads")
+        .rename(columns={"utm_term": "Palavra-chave"})
+    )
 
-        opp_counts = []
-        neg_counts = []
-        for _, row in leads_por_term.iterrows():
-            term_leads = df_t[df_t["utm_term"] == row["Palavra-chave"]]
-            emails = set(term_leads["user_id_email"].dropna().astype(str).str.strip().str.lower())
-            opp_counts.append(len(emails & opp_user_ids))
-            neg_counts.append(len(emails & neg_user_ids))
-        leads_por_term["Oportunidades"] = opp_counts
-        leads_por_term["Negócios"] = neg_counts
-    else:
-        leads_por_term["Oportunidades"] = 0
-        leads_por_term["Negócios"] = 0
+    opp_user_ids = get_opportunity_lead_keys(df_opp_full)
+    neg_df = (
+        df_opp_full[df_opp_full["status_funil"].str.strip().str.lower() == "negócio efetuado"]
+        if (not df_opp_full.empty and "status_funil" in df_opp_full.columns)
+        else pd.DataFrame()
+    )
+    neg_user_ids = get_opportunity_lead_keys(neg_df)
 
+    opp_counts = []
+    neg_counts = []
+    for _, row in leads_por_term.iterrows():
+        term_leads = df_t_unique[df_t_unique["utm_term"] == row["Palavra-chave"]]
+        lead_keys = set(term_leads["lead_key"].dropna())
+        opp_counts.append(len(lead_keys & opp_user_ids))
+        neg_counts.append(len(lead_keys & neg_user_ids))
+
+    leads_por_term["Oportunidades"] = opp_counts
+    leads_por_term["Negócios"] = neg_counts
     return leads_por_term.sort_values("Leads", ascending=False).reset_index(drop=True)
 
 
@@ -1529,6 +1611,12 @@ def render_normal_mode(
     df_leads_meta_whatsapp_filtrado = apply_common_filters(df_leads_meta_whatsapp_periodo, origens_sel, dispositivos_sel)
     df_leads_meta_formulario_periodo = get_period_filtered_df(dfs.get("leads_meta_formulario", pd.DataFrame()), periodo_sel, hoje, ontem)
     df_leads_meta_formulario_filtrado = apply_common_filters(df_leads_meta_formulario_periodo, origens_sel, dispositivos_sel)
+    df_leads_all_filtrado = build_combined_leads(
+        company_slug,
+        df_filtrado,
+        df_leads_meta_whatsapp_filtrado,
+        df_leads_meta_formulario_filtrado,
+    )
 
     if df_filtrado.empty and (
         company_slug != "nextqs"
@@ -1537,30 +1625,32 @@ def render_normal_mode(
         st.warning("Nenhum Lead encontrado para o período selecionado (após filtros).")
         st.stop()
 
-    conv_total, usuarios_unicos, origem_top, dispositivo_top, pct_top = get_kpis(df_filtrado)
+    leads_totais, leads_meta, leads_google_ads = get_highlight_kpis(
+        company_slug,
+        df_filtrado,
+        df_leads_meta_whatsapp_filtrado,
+        df_leads_meta_formulario_filtrado,
+    )
 
-    col1, col2, col3, col4 = st.columns([1, 1, 2, 1])
+    col1, col2, col3 = st.columns(3)
     with col1:
-        render_kpi_single("Leads no período", f"{conv_total}", GREEN_COLOR)
+        render_kpi_single("Leads totais", f"{leads_totais}", GREEN_COLOR)
     with col2:
-        render_kpi_single("Leads únicos", f"{usuarios_unicos}", GREEN_COLOR)
+        render_kpi_single("Leads Meta", f"{leads_meta}", GREEN_COLOR)
     with col3:
-        render_kpi_single("Origem mais comum", f"{origem_top}", GREEN_COLOR)
-    with col4:
-        st.text(f"{dispositivo_top} (%)")
-        st.markdown(kpi_value_html(f"{pct_top:.1f}%", GREEN_COLOR), unsafe_allow_html=True)
+        render_kpi_single("Leads Google Ads", f"{leads_google_ads}", GREEN_COLOR)
 
     st.markdown("---")
 
     if periodo_sel in ["Hoje", "Ontem"]:
         st.subheader("Leads por Hora")
-        conv_por_hora = df_filtrado.groupby("hora").size().reset_index(name="leads").sort_values("hora")
+        conv_por_hora = count_unique_leads_by(df_leads_all_filtrado, ["hora"]).sort_values("hora")
         fig_hora = px.bar(conv_por_hora, x="hora", y="leads")
         fig_hora.update_layout(xaxis_title="Hora do dia", yaxis_title="Leads", xaxis=dict(dtick=1))
         st.plotly_chart(fig_hora, use_container_width=True)
     else:
         st.subheader("Leads por Dia")
-        conv_por_dia = df_filtrado.groupby("data").size().reset_index(name="leads")
+        conv_por_dia = count_unique_leads_by(df_leads_all_filtrado, ["data"])
         fig_dia = px.line(conv_por_dia, x="data", y="leads")
         fig_dia.update_layout(xaxis_title="Data", yaxis_title="Leads")
         st.plotly_chart(fig_dia, use_container_width=True)
@@ -1572,6 +1662,7 @@ def render_normal_mode(
         dfs,
         df_periodo_leads,
         df_leads_meta_whatsapp_periodo if not df_leads_meta_whatsapp_periodo.empty else None,
+        df_leads_meta_formulario_periodo if not df_leads_meta_formulario_periodo.empty else None,
         df_periodo_opportunities,
         df_opp_full,
         periodo_sel,
@@ -1583,14 +1674,14 @@ def render_normal_mode(
     col_g1, col_g2 = st.columns(2)
     with col_g1:
         st.subheader("Leads por Origem")
-        conv_origem = df_filtrado.groupby("origem").size().reset_index(name="leads").sort_values("leads", ascending=False)
+        conv_origem = count_unique_leads_by(df_leads_all_filtrado, ["origem"]).sort_values("leads", ascending=False)
         fig_origem = px.bar(conv_origem, x="origem", y="leads")
         fig_origem.update_layout(xaxis_title="Origem", yaxis_title="Leads")
         st.plotly_chart(fig_origem, use_container_width=True)
 
     with col_g2:
         st.subheader("Leads por Evento")
-        conv_evento = df_filtrado.groupby("evento").size().reset_index(name="leads")
+        conv_evento = count_unique_leads_by(df_leads_all_filtrado, ["evento"])
         conv_evento["evento_legenda"] = conv_evento["evento"].apply(label_evento)
         fig_evento = px.bar(conv_evento, x="evento_legenda", y="leads")
         fig_evento.update_layout(xaxis_title="Evento", yaxis_title="Leads")
@@ -1599,14 +1690,14 @@ def render_normal_mode(
     col_g3, col_g4 = st.columns(2)
     with col_g3:
         st.subheader("Leads por Dispositivo")
-        conv_disp = df_filtrado.groupby("dispositivo").size().reset_index(name="leads")
+        conv_disp = count_unique_leads_by(df_leads_all_filtrado, ["dispositivo"])
         fig_disp = px.bar(conv_disp, x="dispositivo", y="leads")
         fig_disp.update_layout(xaxis_title="Dispositivo", yaxis_title="Leads")
         st.plotly_chart(fig_disp, use_container_width=True)
 
     with col_g4:
         st.subheader("Horário dos Leads")
-        conv_hora = df_filtrado.groupby("hora").size().reset_index(name="leads").sort_values("hora")
+        conv_hora = count_unique_leads_by(df_leads_all_filtrado, ["hora"]).sort_values("hora")
         fig_hora2 = px.bar(conv_hora, x="hora", y="leads")
         fig_hora2.update_layout(xaxis_title="Hora do dia", yaxis_title="Leads")
         st.plotly_chart(fig_hora2, use_container_width=True)
@@ -1616,6 +1707,7 @@ def render_normal_mode(
         company_slug,
         df_filtrado,
         df_leads_meta_whatsapp_filtrado if not df_leads_meta_whatsapp_filtrado.empty else None,
+        df_leads_meta_formulario_filtrado if not df_leads_meta_formulario_filtrado.empty else None,
         df_periodo_opportunities,
         df_negocios_periodo,
     )
@@ -1646,7 +1738,7 @@ def render_normal_mode(
         st.dataframe(df_camp_table, use_container_width=True, height=400)
 
     st.markdown("### Informações por Termos de Pesquisa")
-    df_terms_table = build_terms_table(df_filtrado, df_opp_full)
+    df_terms_table = build_terms_table(df_leads_all_filtrado, df_opp_full)
     if df_terms_table.empty:
         st.info("Nenhuma palavra-chave válida encontrada no período filtrado.")
     else:
@@ -1654,8 +1746,8 @@ def render_normal_mode(
 
     st.markdown("---")
     st.subheader("Dados detalhados (após filtros)")
-    detail_columns = [c for c in ["data_hora", "evento", "dispositivo", "origem", "user_id_email", "ip_address"] if c in df_filtrado.columns]
-    st.dataframe(df_filtrado[detail_columns], use_container_width=True)
+    detail_columns = [c for c in ["data_hora", "evento", "dispositivo", "origem", "user_id_email", "ip_address"] if c in df_leads_all_filtrado.columns]
+    st.dataframe(df_leads_all_filtrado[detail_columns], use_container_width=True)
 
 
 
@@ -1685,7 +1777,22 @@ def render_compare_mode(
     df_m1 = apply_extra_filters_leads(df_m1_leads_base, eventos_sel, origens_sel, dispositivos_sel)
     df_m2 = apply_extra_filters_leads(df_m2_leads_base, eventos_sel, origens_sel, dispositivos_sel)
 
-    if df_m1.empty and df_m2.empty:
+    df_instagram_full = dfs.get("leads_meta_whatsapp", pd.DataFrame())
+    df_formulario_full = dfs.get("leads_meta_formulario", pd.DataFrame())
+    df_ig_m1_base = filter_by_year_month(df_instagram_full, ano_sel, m1_num) if not df_instagram_full.empty else pd.DataFrame()
+    df_ig_m2_base = filter_by_year_month(df_instagram_full, ano_sel, m2_num) if not df_instagram_full.empty else pd.DataFrame()
+    df_form_m1_base = filter_by_year_month(df_formulario_full, ano_sel, m1_num) if not df_formulario_full.empty else pd.DataFrame()
+    df_form_m2_base = filter_by_year_month(df_formulario_full, ano_sel, m2_num) if not df_formulario_full.empty else pd.DataFrame()
+
+    df_ig_m1 = apply_common_filters(df_ig_m1_base, origens_sel, dispositivos_sel)
+    df_ig_m2 = apply_common_filters(df_ig_m2_base, origens_sel, dispositivos_sel)
+    df_form_m1 = apply_common_filters(df_form_m1_base, origens_sel, dispositivos_sel)
+    df_form_m2 = apply_common_filters(df_form_m2_base, origens_sel, dispositivos_sel)
+
+    df_m1_all = build_combined_leads(company_slug, df_m1, df_ig_m1, df_form_m1)
+    df_m2_all = build_combined_leads(company_slug, df_m2, df_ig_m2, df_form_m2)
+
+    if df_m1_all.empty and df_m2_all.empty:
         st.warning("Nenhum Lead encontrado para os meses selecionados (após filtros).")
         st.stop()
 
@@ -1693,28 +1800,21 @@ def render_compare_mode(
     min2, max2 = (df_m2["data"].min(), df_m2["data"].max()) if not df_m2.empty else ("-", "-")
     st.caption(f"Comparação: {m1_label}/{ano_sel} ({min1} a {max1}) vs {m2_label}/{ano_sel} ({min2} a {max2})")
 
-    conv_total_1, usuarios_unicos_1, origem_top_1, disp_top_1, pct_top_1 = get_kpis(df_m1)
-    conv_total_2, usuarios_unicos_2, origem_top_2, disp_top_2, pct_top_2 = get_kpis(df_m2)
+    leads_totais_1, leads_meta_1, leads_google_ads_1 = get_highlight_kpis(company_slug, df_m1, df_ig_m1, df_form_m1)
+    leads_totais_2, leads_meta_2, leads_google_ads_2 = get_highlight_kpis(company_slug, df_m2, df_ig_m2, df_form_m2)
 
-    col1, col2, col3, col4 = st.columns([1, 1, 2, 1])
+    col1, col2, col3 = st.columns(3)
     with col1:
-        render_kpi_dual("Leads no período", f"{conv_total_1}", f"{conv_total_2}", COMPARE_COLOR_1, COMPARE_COLOR_2)
+        render_kpi_dual("Leads totais", f"{leads_totais_1}", f"{leads_totais_2}", COMPARE_COLOR_1, COMPARE_COLOR_2)
     with col2:
-        render_kpi_dual("Leads únicos", f"{usuarios_unicos_1}", f"{usuarios_unicos_2}", COMPARE_COLOR_1, COMPARE_COLOR_2)
+        render_kpi_dual("Leads Meta", f"{leads_meta_1}", f"{leads_meta_2}", COMPARE_COLOR_1, COMPARE_COLOR_2)
     with col3:
-        render_kpi_dual("Origem mais comum", f"{origem_top_1}", f"{origem_top_2}", COMPARE_COLOR_1, COMPARE_COLOR_2)
-    with col4:
-        st.text("Dispositivo (%)")
-        st.markdown(
-            kpi_value_html(f"{disp_top_1} {pct_top_1:.1f}%", COMPARE_COLOR_1)
-            + kpi_value_html(f"{disp_top_2} {pct_top_2:.1f}%", COMPARE_COLOR_2),
-            unsafe_allow_html=True,
-        )
+        render_kpi_dual("Leads Google Ads", f"{leads_google_ads_1}", f"{leads_google_ads_2}", COMPARE_COLOR_1, COMPARE_COLOR_2)
 
     st.markdown("---")
     st.subheader("Leads por Dia")
-    conv_por_dia_1 = df_m1.groupby("data").size().reset_index(name="leads")
-    conv_por_dia_2 = df_m2.groupby("data").size().reset_index(name="leads")
+    conv_por_dia_1 = count_unique_leads_by(df_m1_all, ["data"])
+    conv_por_dia_2 = count_unique_leads_by(df_m2_all, ["data"])
     fig = go.Figure()
     if not conv_por_dia_1.empty:
         fig.add_trace(go.Scatter(x=conv_por_dia_1["data"], y=conv_por_dia_1["leads"], mode="lines", name=f"{m1_label}/{ano_sel}", line=dict(color=COMPARE_COLOR_1)))
@@ -1727,17 +1827,13 @@ def render_compare_mode(
     st.subheader("Funil")
     tab_f1, tab_f2 = st.tabs([f"{m1_label}/{ano_sel}", f"{m2_label}/{ano_sel}"])
 
-    # Instagram para compare mode
-    df_instagram_full = dfs.get("leads_meta_whatsapp", pd.DataFrame())
-    df_ig_m1 = filter_by_year_month(df_instagram_full, ano_sel, m1_num) if not df_instagram_full.empty else pd.DataFrame()
-    df_ig_m2 = filter_by_year_month(df_instagram_full, ano_sel, m2_num) if not df_instagram_full.empty else pd.DataFrame()
-
     with tab_f1:
         render_central_funnel_compare(
             company_slug,
             dfs,
             df_m1_leads_base,
-            df_ig_m1 if not df_ig_m1.empty else None,
+            df_ig_m1_base if not df_ig_m1_base.empty else None,
+            df_form_m1_base if not df_form_m1_base.empty else None,
             df_m1_opp,
             df_opp_full,
             ano_sel,
@@ -1750,7 +1846,8 @@ def render_compare_mode(
             company_slug,
             dfs,
             df_m2_leads_base,
-            df_ig_m2 if not df_ig_m2.empty else None,
+            df_ig_m2_base if not df_ig_m2_base.empty else None,
+            df_form_m2_base if not df_form_m2_base.empty else None,
             df_m2_opp,
             df_opp_full,
             ano_sel,
@@ -1762,9 +1859,9 @@ def render_compare_mode(
     col_g1, col_g2 = st.columns(2)
     with col_g1:
         st.subheader("Leads por Origem")
-        o1 = df_m1.groupby("origem").size().reset_index(name="leads")
+        o1 = count_unique_leads_by(df_m1_all, ["origem"])
         o1["mes"] = f"{m1_label}/{ano_sel}"
-        o2 = df_m2.groupby("origem").size().reset_index(name="leads")
+        o2 = count_unique_leads_by(df_m2_all, ["origem"])
         o2["mes"] = f"{m2_label}/{ano_sel}"
         conv_origem = pd.concat([o1, o2], ignore_index=True)
         fig_origem = px.bar(conv_origem, x="origem", y="leads", color="mes", barmode="group", color_discrete_map={f"{m1_label}/{ano_sel}": COMPARE_COLOR_1, f"{m2_label}/{ano_sel}": COMPARE_COLOR_2})
@@ -1772,10 +1869,10 @@ def render_compare_mode(
 
     with col_g2:
         st.subheader("Leads por Evento")
-        e1 = df_m1.groupby("evento").size().reset_index(name="leads")
+        e1 = count_unique_leads_by(df_m1_all, ["evento"])
         e1["evento_legenda"] = e1["evento"].apply(label_evento)
         e1["mes"] = f"{m1_label}/{ano_sel}"
-        e2 = df_m2.groupby("evento").size().reset_index(name="leads")
+        e2 = count_unique_leads_by(df_m2_all, ["evento"])
         e2["evento_legenda"] = e2["evento"].apply(label_evento)
         e2["mes"] = f"{m2_label}/{ano_sel}"
         conv_evento = pd.concat([e1, e2], ignore_index=True)
@@ -1786,9 +1883,9 @@ def render_compare_mode(
     col_g3, col_g4 = st.columns(2)
     with col_g3:
         st.subheader("Leads por Dispositivo")
-        d1 = df_m1.groupby("dispositivo").size().reset_index(name="leads")
+        d1 = count_unique_leads_by(df_m1_all, ["dispositivo"])
         d1["mes"] = f"{m1_label}/{ano_sel}"
-        d2 = df_m2.groupby("dispositivo").size().reset_index(name="leads")
+        d2 = count_unique_leads_by(df_m2_all, ["dispositivo"])
         d2["mes"] = f"{m2_label}/{ano_sel}"
         conv_disp = pd.concat([d1, d2], ignore_index=True)
         fig_disp = px.bar(conv_disp, x="dispositivo", y="leads", color="mes", barmode="group", color_discrete_map={f"{m1_label}/{ano_sel}": COMPARE_COLOR_1, f"{m2_label}/{ano_sel}": COMPARE_COLOR_2})
@@ -1796,9 +1893,9 @@ def render_compare_mode(
 
     with col_g4:
         st.subheader("Horário dos Leads")
-        h1 = df_m1.groupby("hora").size().reset_index(name="leads")
+        h1 = count_unique_leads_by(df_m1_all, ["hora"])
         h1["mes"] = f"{m1_label}/{ano_sel}"
-        h2 = df_m2.groupby("hora").size().reset_index(name="leads")
+        h2 = count_unique_leads_by(df_m2_all, ["hora"])
         h2["mes"] = f"{m2_label}/{ano_sel}"
         conv_hora = pd.concat([h1, h2], ignore_index=True)
         fig_hora = px.bar(conv_hora, x="hora", y="leads", color="mes", barmode="group", color_discrete_map={f"{m1_label}/{ano_sel}": COMPARE_COLOR_1, f"{m2_label}/{ano_sel}": COMPARE_COLOR_2})
