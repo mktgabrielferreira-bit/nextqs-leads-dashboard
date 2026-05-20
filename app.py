@@ -1,4 +1,5 @@
 import io
+import base64
 import html
 import re
 import unicodedata
@@ -82,10 +83,10 @@ DIA_SEMANA_LABEL = {
     6: "Domingo",
 }
 
-GREEN_COLOR = "#22c55e"
+GREEN_COLOR = "#8E176B"
 COMPARE_COLOR_1 = "#2563EB"
 COMPARE_COLOR_2 = "#F97316"
-FUNNEL_COLOR = "#B32157"
+FUNNEL_COLOR = "#1896D8"
 
 
 def login():
@@ -1239,6 +1240,25 @@ def get_common_origin(
     return unique["_origin_group"].value_counts().index[0]
 
 
+def image_data_uri(path: str) -> str | None:
+    image_path = Path(path)
+    if not image_path.exists():
+        return None
+    suffix = image_path.suffix.lower().lstrip(".")
+    mime = "jpeg" if suffix in {"jpg", "jpeg"} else suffix
+    data = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return f"data:image/{mime};base64,{data}"
+
+
+def get_origin_icon_data_uri(origin: str) -> str | None:
+    origin_norm = strip_accents(origin)
+    if "google ads" in origin_norm:
+        return image_data_uri("assets/google_ads.png")
+    if "meta" in origin_norm:
+        return image_data_uri("assets/meta_ads.png")
+    return None
+
+
 def get_opportunity_metrics(df_opportunities: pd.DataFrame) -> dict[str, str]:
     if df_opportunities is None:
         df_opportunities = pd.DataFrame()
@@ -1260,7 +1280,33 @@ def get_opportunity_metrics(df_opportunities: pd.DataFrame) -> dict[str, str]:
     }
 
 
+def origin_value_html(value: str, color: str, size_css: str = "clamp(20px, 2.2vw, 32px)") -> str:
+    icon_uri = get_origin_icon_data_uri(value)
+    if not icon_uri:
+        return (
+            f"<div style='font-size: {size_css}; font-weight: 800; color: {color}; "
+            f"line-height: 1.05; overflow-wrap: anywhere;'>{html.escape(str(value))}</div>"
+        )
+
+    return (
+        "<div style='display: flex; align-items: center; gap: 10px; min-width: 0;'>"
+        f"<img src='{icon_uri}' style='height: 38px; width: 38px; object-fit: contain; flex: 0 0 auto;' />"
+        f"<div style='font-size: {size_css}; font-weight: 800; color: {color}; "
+        f"line-height: 1.05; overflow-wrap: anywhere;'>{html.escape(str(value))}</div>"
+        "</div>"
+    )
+
+
 def render_highlight_card(label: str, value: str, color: str = GREEN_COLOR):
+    value_html = (
+        origin_value_html(value, color)
+        if label == "Origem mais comum"
+        else (
+            f"<div style='font-size: clamp(20px, 2.2vw, 32px); font-weight: 800; color: {color}; "
+            f"line-height: 1.05; overflow-wrap: anywhere;'>{html.escape(str(value))}</div>"
+        )
+    )
+
     st.markdown(
         f"""
         <div style="
@@ -1273,12 +1319,7 @@ def render_highlight_card(label: str, value: str, color: str = GREEN_COLOR):
             flex-direction: column;
             justify-content: space-between;">
             <div style="font-size: 14px; opacity: 0.85; line-height: 1.2;">{html.escape(str(label))}</div>
-            <div style="
-                font-size: clamp(20px, 2.2vw, 32px);
-                font-weight: 800;
-                color: {color};
-                line-height: 1.05;
-                overflow-wrap: anywhere;">{html.escape(str(value))}</div>
+            {value_html}
         </div>
         """,
         unsafe_allow_html=True,
@@ -1337,6 +1378,17 @@ def render_highlights(
 
 
 def render_compare_highlight_card(label: str, value_1: str, value_2: str, color_1: str, color_2: str):
+    value_1_html = (
+        origin_value_html(value_1, color_1, "clamp(18px, 1.7vw, 28px)")
+        if label == "Origem mais comum"
+        else f"<div style='font-size: clamp(18px, 1.7vw, 28px); font-weight: 800; color: {color_1}; line-height: 1.1; overflow-wrap: anywhere;'>{html.escape(str(value_1))}</div>"
+    )
+    value_2_html = (
+        origin_value_html(value_2, color_2, "clamp(18px, 1.7vw, 28px)")
+        if label == "Origem mais comum"
+        else f"<div style='font-size: clamp(18px, 1.7vw, 28px); font-weight: 800; color: {color_2}; line-height: 1.1; overflow-wrap: anywhere;'>{html.escape(str(value_2))}</div>"
+    )
+
     st.markdown(
         f"""
         <div style="
@@ -1346,8 +1398,8 @@ def render_compare_highlight_card(label: str, value_1: str, value_2: str, color_
             background: rgba(255,255,255,0.03);
             border: 1px solid rgba(255,255,255,0.06);">
             <div style="font-size: 14px; opacity: 0.85; line-height: 1.2; margin-bottom: 8px;">{html.escape(str(label))}</div>
-            <div style="font-size: clamp(18px, 1.7vw, 28px); font-weight: 800; color: {color_1}; line-height: 1.1; overflow-wrap: anywhere;">{html.escape(str(value_1))}</div>
-            <div style="font-size: clamp(18px, 1.7vw, 28px); font-weight: 800; color: {color_2}; line-height: 1.1; overflow-wrap: anywhere;">{html.escape(str(value_2))}</div>
+            {value_1_html}
+            {value_2_html}
         </div>
         """,
         unsafe_allow_html=True,
@@ -1967,7 +2019,7 @@ def render_normal_mode(
         st.plotly_chart(fig_origem, use_container_width=True)
 
     with col_g2:
-        st.subheader("Leads por Evento")
+        st.subheader("Formulários do Site")
         conv_evento = count_unique_leads_by(df_leads_all_filtrado, ["evento"])
         conv_evento["evento_legenda"] = conv_evento["evento"].apply(label_evento)
         fig_evento = px.bar(conv_evento, x="evento_legenda", y="leads")
@@ -2167,7 +2219,7 @@ def render_compare_mode(
         st.plotly_chart(fig_origem, use_container_width=True)
 
     with col_g2:
-        st.subheader("Leads por Evento")
+        st.subheader("Formulários do Site")
         e1 = count_unique_leads_by(df_m1_all, ["evento"])
         e1["evento_legenda"] = e1["evento"].apply(label_evento)
         e1["mes"] = f"{m1_label}/{ano_sel}"
