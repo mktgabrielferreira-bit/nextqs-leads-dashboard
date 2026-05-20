@@ -1289,10 +1289,9 @@ def origin_value_html(value: str, color: str, size_css: str = "clamp(20px, 2.2vw
         )
 
     return (
-        "<div style='display: flex; align-items: center; gap: 10px; min-width: 0;'>"
-        f"<img src='{icon_uri}' style='height: 38px; width: 38px; object-fit: contain; flex: 0 0 auto;' />"
-        f"<div style='font-size: {size_css}; font-weight: 800; color: {color}; "
-        f"line-height: 1.05; overflow-wrap: anywhere;'>{html.escape(str(value))}</div>"
+        "<div style='display: flex; align-items: center; min-width: 0;'>"
+        f"<img src='{icon_uri}' alt='{html.escape(str(value))}' "
+        "style='height: 48px; max-width: 180px; width: auto; object-fit: contain;' />"
         "</div>"
     )
 
