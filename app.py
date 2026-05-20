@@ -1,5 +1,7 @@
 import io
+import html
 import re
+import unicodedata
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -163,6 +165,14 @@ def normalize_text(value):
     return str(value).strip()
 
 
+def strip_accents(value) -> str:
+    text = normalize_text(value).lower()
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(ch)
+    )
+
+
 def has_qualified_marker(value) -> bool:
     return normalize_text(value).lower() in {"sim", "duplicado"}
 
@@ -194,6 +204,16 @@ def filter_by_year_month(df: pd.DataFrame, ano: int, mes_num: int) -> pd.DataFra
     if df.empty or "ano" not in df.columns or "mes" not in df.columns:
         return df.copy()
     return df[(df["ano"] == int(ano)) & (df["mes"] == int(mes_num))].copy()
+
+
+def filter_by_custom_selection(df: pd.DataFrame, ano: int, mes_label: str) -> pd.DataFrame:
+    if df.empty or "ano" not in df.columns:
+        return df.copy()
+    if mes_label == "Todo o ano":
+        return df[df["ano"] == int(ano)].copy()
+    if "mes" not in df.columns:
+        return df.copy()
+    return filter_by_year_month(df, ano, month_label_to_num(mes_label))
 
 
 def trigger_sheet_reload():
@@ -967,13 +987,25 @@ def get_period_filtered_df(df_src: pd.DataFrame, periodo_sel: str, hoje: date, o
         return df_src[(df_src["data"] >= start) & (df_src["data"] <= end)].copy()
     if periodo_sel == "Este mês":
         start = date(hoje.year, hoje.month, 1)
-        end = ontem
+        end = hoje
         return df_src[(df_src["data"] >= start) & (df_src["data"] <= end)].copy()
     if periodo_sel == "Este ano":
         start = date(hoje.year, 1, 1)
         end = hoje
         return df_src[(df_src["data"] >= start) & (df_src["data"] <= end)].copy()
     return df_src.copy()
+
+
+def get_effective_period_filtered_df(df_src: pd.DataFrame, periodo_sel: str, hoje: date, ontem: date) -> pd.DataFrame:
+    if periodo_sel == "Personalizado":
+        if st.session_state.get("custom_aplicado", False):
+            return filter_by_custom_selection(
+                df_src,
+                int(st.session_state.get("custom_ano", hoje.year)),
+                st.session_state.get("custom_mes_label", "Todo o ano"),
+            )
+        return get_period_filtered_df(df_src, "Últimos 7 dias", hoje, ontem)
+    return get_period_filtered_df(df_src, periodo_sel, hoje, ontem)
 
 
 def apply_extra_filters_leads(df_base: pd.DataFrame, eventos_sel, origens_sel, dispositivos_sel) -> pd.DataFrame:
@@ -1104,6 +1136,268 @@ def get_highlight_kpis(
     return leads_totais, leads_meta, leads_google_ads
 
 
+def is_negocio_efetuado(value) -> bool:
+    return strip_accents(value) == "negocio efetuado"
+
+
+def first_matching_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    if df is None or df.empty:
+        return None
+
+    normalized_candidates = {strip_accents(c).replace(" ", "_") for c in candidates}
+    for col in df.columns:
+        normalized_col = strip_accents(col).replace(" ", "_")
+        if normalized_col in normalized_candidates:
+            return col
+    return None
+
+
+def mode_text(df: pd.DataFrame, col: str | None) -> str:
+    if df is None or df.empty or not col or col not in df.columns:
+        return "—"
+    values = df[col].dropna().astype(str).str.strip()
+    values = values[values != ""]
+    if values.empty:
+        return "—"
+    return values.value_counts().index[0]
+
+
+def format_percent(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{value * 100:.1f}%".replace(".", ",")
+
+
+def format_avg_days(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    value = max(0.0, float(value))
+    if abs(value - 1.0) < 0.05:
+        return "1 dia"
+    return f"{value:.1f} dias".replace(".", ",")
+
+
+def average_days_between(df: pd.DataFrame, start_col: str, end_col: str) -> float | None:
+    if df is None or df.empty or start_col not in df.columns or end_col not in df.columns:
+        return None
+    start = pd.to_datetime(df[start_col], dayfirst=True, errors="coerce")
+    end = pd.to_datetime(df[end_col], dayfirst=True, errors="coerce")
+    days = (end - start).dt.total_seconds() / 86400
+    days = days.dropna()
+    days = days[days >= 0]
+    if days.empty:
+        return None
+    return float(days.mean())
+
+
+def classify_origin(value, lead_source: str | None = None) -> str:
+    if lead_source in {"leads_meta_whatsapp", "leads_meta_formulario"} or is_meta_origin(value):
+        return "Meta Ads"
+
+    text = strip_accents(value)
+    if is_google_ads_origin(value):
+        return "Google Ads"
+    if "organic" in text or "organica" in text or "organico" in text or "busca organica" in text:
+        return "Busca Orgânica"
+
+    origin = normalize_origin(value)
+    return origin if origin else "Origem não identificada"
+
+
+def get_common_origin(
+    company_slug: str,
+    df_leads_site: pd.DataFrame,
+    df_leads_meta_whatsapp: pd.DataFrame | None,
+    df_leads_meta_formulario: pd.DataFrame | None,
+) -> str:
+    frames = []
+    for source, df in [
+        ("leads_site", df_leads_site),
+        ("leads_meta_whatsapp", df_leads_meta_whatsapp),
+        ("leads_meta_formulario", df_leads_meta_formulario),
+    ]:
+        if df is None or df.empty:
+            continue
+        if source != "leads_site" and company_slug != "nextqs":
+            continue
+        item = df.copy()
+        item["_lead_source"] = source
+        frames.append(item)
+
+    combined = concat_non_empty(frames)
+    if combined.empty:
+        return "—"
+
+    prepared = prepare_leads_for_reporting(combined)
+    prepared["_origin_group"] = prepared.apply(
+        lambda row: classify_origin(row.get("origem"), row.get("_lead_source")),
+        axis=1,
+    )
+    unique = prepared.drop_duplicates(subset=["_origin_group", "lead_key"])
+    if unique.empty:
+        return "—"
+    return unique["_origin_group"].value_counts().index[0]
+
+
+def get_opportunity_metrics(df_opportunities: pd.DataFrame) -> dict[str, str]:
+    if df_opportunities is None:
+        df_opportunities = pd.DataFrame()
+
+    opp_count = len(df_opportunities) if not df_opportunities.empty else 0
+    negocio_count = count_negocios_efetuados_in_opportunities(df_opportunities)
+    negocio_rate = (negocio_count / opp_count) if opp_count else None
+
+    segmento_col = first_matching_col(df_opportunities, ["area_atuação", "area_atuacao", "Área de Atuação"])
+    consultor_col = first_matching_col(df_opportunities, ["consultor", "Nome Colaborador Responsável"])
+
+    return {
+        "oportunidades": str(opp_count),
+        "segmento": mode_text(df_opportunities, segmento_col),
+        "consultor": mode_text(df_opportunities, consultor_col),
+        "taxa_negocios": format_percent(negocio_rate),
+        "tempo_oportunidade": format_avg_days(average_days_between(df_opportunities, "data_lead", "data_oportunidade")),
+        "tempo_encerramento": format_avg_days(average_days_between(df_opportunities, "data_oportunidade", "data_encerramento")),
+    }
+
+
+def render_highlight_card(label: str, value: str, color: str = GREEN_COLOR):
+    st.markdown(
+        f"""
+        <div style="
+            min-height: 96px;
+            padding: 10px 12px;
+            border-radius: 10px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;">
+            <div style="font-size: 14px; opacity: 0.85; line-height: 1.2;">{html.escape(str(label))}</div>
+            <div style="
+                font-size: clamp(20px, 2.2vw, 32px);
+                font-weight: 800;
+                color: {color};
+                line-height: 1.05;
+                overflow-wrap: anywhere;">{html.escape(str(value))}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def get_highlight_cards(
+    company_slug: str,
+    df_leads_site: pd.DataFrame,
+    df_leads_meta_whatsapp: pd.DataFrame,
+    df_leads_meta_formulario: pd.DataFrame,
+    df_opportunities_periodo: pd.DataFrame,
+) -> list[tuple[str, str]]:
+    df_leads_all = build_combined_leads(
+        company_slug,
+        df_leads_site,
+        df_leads_meta_whatsapp,
+        df_leads_meta_formulario,
+    )
+    opp_metrics = get_opportunity_metrics(df_opportunities_periodo)
+
+    return [
+        ("Leads", str(count_unique_leads(df_leads_all))),
+        ("Oportunidades", opp_metrics["oportunidades"]),
+        ("Origem mais comum", get_common_origin(company_slug, df_leads_site, df_leads_meta_whatsapp, df_leads_meta_formulario)),
+        ("Segmento mais comum", opp_metrics["segmento"]),
+        ("Taxa de Negócios Efetuados", opp_metrics["taxa_negocios"]),
+        ("Tempo Médio Oportunidade", opp_metrics["tempo_oportunidade"]),
+        ("Tempo Médio Encerramento", opp_metrics["tempo_encerramento"]),
+        ("Consultor com mais oportunidades", opp_metrics["consultor"]),
+    ]
+
+
+def render_highlights(
+    company_slug: str,
+    df_leads_site: pd.DataFrame,
+    df_leads_meta_whatsapp: pd.DataFrame,
+    df_leads_meta_formulario: pd.DataFrame,
+    df_opportunities_periodo: pd.DataFrame,
+):
+    cards = get_highlight_cards(
+        company_slug,
+        df_leads_site,
+        df_leads_meta_whatsapp,
+        df_leads_meta_formulario,
+        df_opportunities_periodo,
+    )
+
+    for start in (0, 4):
+        cols = st.columns(4)
+        for col, (label, value) in zip(cols, cards[start:start + 4]):
+            with col:
+                render_highlight_card(label, value, GREEN_COLOR)
+        if start == 0:
+            st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+
+def render_compare_highlight_card(label: str, value_1: str, value_2: str, color_1: str, color_2: str):
+    st.markdown(
+        f"""
+        <div style="
+            min-height: 112px;
+            padding: 10px 12px;
+            border-radius: 10px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);">
+            <div style="font-size: 14px; opacity: 0.85; line-height: 1.2; margin-bottom: 8px;">{html.escape(str(label))}</div>
+            <div style="font-size: clamp(18px, 1.7vw, 28px); font-weight: 800; color: {color_1}; line-height: 1.1; overflow-wrap: anywhere;">{html.escape(str(value_1))}</div>
+            <div style="font-size: clamp(18px, 1.7vw, 28px); font-weight: 800; color: {color_2}; line-height: 1.1; overflow-wrap: anywhere;">{html.escape(str(value_2))}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_compare_highlights(
+    company_slug: str,
+    df_m1_leads: pd.DataFrame,
+    df_m1_meta_whatsapp: pd.DataFrame,
+    df_m1_meta_formulario: pd.DataFrame,
+    df_m1_opportunities: pd.DataFrame,
+    df_m2_leads: pd.DataFrame,
+    df_m2_meta_whatsapp: pd.DataFrame,
+    df_m2_meta_formulario: pd.DataFrame,
+    df_m2_opportunities: pd.DataFrame,
+):
+    cards_1 = get_highlight_cards(company_slug, df_m1_leads, df_m1_meta_whatsapp, df_m1_meta_formulario, df_m1_opportunities)
+    cards_2 = get_highlight_cards(company_slug, df_m2_leads, df_m2_meta_whatsapp, df_m2_meta_formulario, df_m2_opportunities)
+
+    for start in (0, 4):
+        cols = st.columns(4)
+        for idx, col in enumerate(cols, start=start):
+            label = cards_1[idx][0]
+            with col:
+                render_compare_highlight_card(label, cards_1[idx][1], cards_2[idx][1], COMPARE_COLOR_1, COMPARE_COLOR_2)
+        if start == 0:
+            st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+
+def render_leads_by_day_chart(df_leads: pd.DataFrame, y_label: str = "Leads"):
+    conv_por_dia = count_unique_leads_by(df_leads, ["data"])
+    if conv_por_dia.empty:
+        st.info("Sem dados para o gráfico.")
+        return
+
+    conv_por_dia = conv_por_dia.sort_values("data")
+    fig = px.line(conv_por_dia, x="data", y="leads", markers=True, template="plotly_dark")
+    fig.update_traces(line=dict(color="#5B6CFF", width=2), marker=dict(size=6, color="#5B6CFF"))
+    fig.update_layout(
+        height=360,
+        margin=dict(l=20, r=20, t=20, b=20),
+        xaxis_title="Data",
+        yaxis_title=y_label,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def get_kpis(df_kpi: pd.DataFrame):
     conv_total = len(df_kpi)
     usuarios_unicos = df_kpi["user_id_email"].nunique() if (not df_kpi.empty and "user_id_email" in df_kpi.columns) else 0
@@ -1226,6 +1520,12 @@ def get_leads_count_for_funnel(
     return count_unique_leads(combined)
 
 
+def count_negocios_efetuados_in_opportunities(df_opportunities: pd.DataFrame) -> int:
+    if df_opportunities is None or df_opportunities.empty or "status_funil" not in df_opportunities.columns:
+        return 0
+    return int(df_opportunities["status_funil"].apply(is_negocio_efetuado).sum())
+
+
 def get_negocios_efetuados_count(df_opp_full: pd.DataFrame, periodo_sel: str, hoje: date, ontem: date) -> int:
     """
     Conta negócios efetuados filtrando por Data Encerramento no período selecionado
@@ -1236,9 +1536,7 @@ def get_negocios_efetuados_count(df_opp_full: pd.DataFrame, periodo_sel: str, ho
     if "status_funil" not in df_opp_full.columns:
         return 0
 
-    df_neg = df_opp_full[
-        df_opp_full["status_funil"].str.strip().str.lower() == "negócio efetuado"
-    ].copy()
+    df_neg = df_opp_full[df_opp_full["status_funil"].apply(is_negocio_efetuado)].copy()
 
     if df_neg.empty:
         return 0
@@ -1258,7 +1556,7 @@ def get_negocios_efetuados_count(df_opp_full: pd.DataFrame, periodo_sel: str, ho
         return len(df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= ontem)])
     if periodo_sel == "Este mês":
         start = date(hoje.year, hoje.month, 1)
-        return len(df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= ontem)])
+        return len(df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= hoje)])
     if periodo_sel == "Este ano":
         start = date(hoje.year, 1, 1)
         return len(df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= hoje)])
@@ -1270,9 +1568,7 @@ def get_negocios_efetuados_count_by_month(df_opp_full: pd.DataFrame, ano: int, m
     """Conta negócios efetuados por mês (usando data_encerramento_parsed)."""
     if df_opp_full.empty or "status_funil" not in df_opp_full.columns:
         return 0
-    df_neg = df_opp_full[
-        df_opp_full["status_funil"].str.strip().str.lower() == "negócio efetuado"
-    ].copy()
+    df_neg = df_opp_full[df_opp_full["status_funil"].apply(is_negocio_efetuado)].copy()
     if df_neg.empty or "data_encerramento_parsed" not in df_neg.columns:
         return len(df_neg)
     df_neg = df_neg.dropna(subset=["data_encerramento_parsed"])
@@ -1304,7 +1600,7 @@ def render_central_funnel(
         df_leads_meta_formulario_periodo,
     )
     opp_count = len(df_opportunities_periodo) if not df_opportunities_periodo.empty else 0
-    negocios_count = get_negocios_efetuados_count(df_opp_full, periodo_sel, hoje, ontem)
+    negocios_count = count_negocios_efetuados_in_opportunities(df_opportunities_periodo)
 
     steps = [
         ("Leads", leads_count),
@@ -1336,7 +1632,7 @@ def render_central_funnel_compare(
         df_leads_meta_formulario_periodo,
     )
     opp_count = len(df_opportunities_periodo) if not df_opportunities_periodo.empty else 0
-    negocios_count = get_negocios_efetuados_count_by_month(df_opp_full, ano, mes_num)
+    negocios_count = count_negocios_efetuados_in_opportunities(df_opportunities_periodo)
 
     steps = [
         ("Leads", leads_count),
@@ -1396,9 +1692,7 @@ def get_negocios_efetuados_df(df_opp_full: pd.DataFrame, periodo_sel: str, hoje:
     if df_opp_full.empty or "status_funil" not in df_opp_full.columns:
         return pd.DataFrame(columns=df_opp_full.columns if not df_opp_full.empty else [])
 
-    df_neg = df_opp_full[
-        df_opp_full["status_funil"].astype(str).str.strip().str.lower() == "negócio efetuado"
-    ].copy()
+    df_neg = df_opp_full[df_opp_full["status_funil"].apply(is_negocio_efetuado)].copy()
 
     if df_neg.empty:
         return df_neg
@@ -1418,7 +1712,7 @@ def get_negocios_efetuados_df(df_opp_full: pd.DataFrame, periodo_sel: str, hoje:
         return df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= ontem)].copy()
     if periodo_sel == "Este mês":
         start = date(hoje.year, hoje.month, 1)
-        return df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= ontem)].copy()
+        return df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= hoje)].copy()
     if periodo_sel == "Este ano":
         start = date(hoje.year, 1, 1)
         return df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= hoje)].copy()
@@ -1525,7 +1819,7 @@ def build_campaign_table(
     neg_source = df_negocios_periodo
     if neg_source is None:
         neg_source = (
-            df_opp_full[df_opp_full["status_funil"].str.strip().str.lower() == "negócio efetuado"]
+            df_opp_full[df_opp_full["status_funil"].apply(is_negocio_efetuado)]
             if (not df_opp_full.empty and "status_funil" in df_opp_full.columns)
             else pd.DataFrame()
         )
@@ -1569,7 +1863,7 @@ def build_terms_table(
 
     opp_user_ids = get_opportunity_lead_keys(df_opp_full)
     neg_df = (
-        df_opp_full[df_opp_full["status_funil"].str.strip().str.lower() == "negócio efetuado"]
+        df_opp_full[df_opp_full["status_funil"].apply(is_negocio_efetuado)]
         if (not df_opp_full.empty and "status_funil" in df_opp_full.columns)
         else pd.DataFrame()
     )
@@ -1607,15 +1901,18 @@ def render_normal_mode(
     ontem,
 ):
     df_filtrado = apply_extra_filters_leads(df_periodo_leads, eventos_sel, origens_sel, dispositivos_sel)
-    df_leads_meta_whatsapp_periodo = get_period_filtered_df(dfs.get("leads_meta_whatsapp", pd.DataFrame()), periodo_sel, hoje, ontem)
+    df_leads_meta_whatsapp_periodo = get_effective_period_filtered_df(dfs.get("leads_meta_whatsapp", pd.DataFrame()), periodo_sel, hoje, ontem)
     df_leads_meta_whatsapp_filtrado = apply_common_filters(df_leads_meta_whatsapp_periodo, origens_sel, dispositivos_sel)
-    df_leads_meta_formulario_periodo = get_period_filtered_df(dfs.get("leads_meta_formulario", pd.DataFrame()), periodo_sel, hoje, ontem)
+    df_leads_meta_formulario_periodo = get_effective_period_filtered_df(dfs.get("leads_meta_formulario", pd.DataFrame()), periodo_sel, hoje, ontem)
     df_leads_meta_formulario_filtrado = apply_common_filters(df_leads_meta_formulario_periodo, origens_sel, dispositivos_sel)
     df_leads_all_filtrado = build_combined_leads(
         company_slug,
         df_filtrado,
         df_leads_meta_whatsapp_filtrado,
         df_leads_meta_formulario_filtrado,
+    )
+    df_leads_with_time_filtrado = concat_non_empty(
+        [df_filtrado, df_leads_meta_formulario_filtrado if company_slug == "nextqs" else pd.DataFrame()]
     )
 
     if df_filtrado.empty and (
@@ -1625,44 +1922,34 @@ def render_normal_mode(
         st.warning("Nenhum Lead encontrado para o período selecionado (após filtros).")
         st.stop()
 
-    leads_totais, leads_meta, leads_google_ads = get_highlight_kpis(
+    render_highlights(
         company_slug,
         df_filtrado,
         df_leads_meta_whatsapp_filtrado,
         df_leads_meta_formulario_filtrado,
+        df_periodo_opportunities,
     )
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        render_kpi_single("Leads totais", f"{leads_totais}", GREEN_COLOR)
-    with col2:
-        render_kpi_single("Leads Meta", f"{leads_meta}", GREEN_COLOR)
-    with col3:
-        render_kpi_single("Leads Google Ads", f"{leads_google_ads}", GREEN_COLOR)
 
     st.markdown("---")
 
     if periodo_sel in ["Hoje", "Ontem"]:
         st.subheader("Leads por Hora")
-        conv_por_hora = count_unique_leads_by(df_leads_all_filtrado, ["hora"]).sort_values("hora")
+        conv_por_hora = count_unique_leads_by(df_leads_with_time_filtrado, ["hora"]).sort_values("hora")
         fig_hora = px.bar(conv_por_hora, x="hora", y="leads")
         fig_hora.update_layout(xaxis_title="Hora do dia", yaxis_title="Leads", xaxis=dict(dtick=1))
         st.plotly_chart(fig_hora, use_container_width=True)
     else:
         st.subheader("Leads por Dia")
-        conv_por_dia = count_unique_leads_by(df_leads_all_filtrado, ["data"])
-        fig_dia = px.line(conv_por_dia, x="data", y="leads")
-        fig_dia.update_layout(xaxis_title="Data", yaxis_title="Leads")
-        st.plotly_chart(fig_dia, use_container_width=True)
+        render_leads_by_day_chart(df_leads_all_filtrado)
 
     st.markdown("---")
 
     render_central_funnel(
         company_slug,
         dfs,
-        df_periodo_leads,
-        df_leads_meta_whatsapp_periodo if not df_leads_meta_whatsapp_periodo.empty else None,
-        df_leads_meta_formulario_periodo if not df_leads_meta_formulario_periodo.empty else None,
+        df_filtrado,
+        df_leads_meta_whatsapp_filtrado if not df_leads_meta_whatsapp_filtrado.empty else None,
+        df_leads_meta_formulario_filtrado if not df_leads_meta_formulario_filtrado.empty else None,
         df_periodo_opportunities,
         df_opp_full,
         periodo_sel,
@@ -1690,19 +1977,23 @@ def render_normal_mode(
     col_g3, col_g4 = st.columns(2)
     with col_g3:
         st.subheader("Leads por Dispositivo")
-        conv_disp = count_unique_leads_by(df_leads_all_filtrado, ["dispositivo"])
+        conv_disp = count_unique_leads_by(df_filtrado, ["dispositivo"])
         fig_disp = px.bar(conv_disp, x="dispositivo", y="leads")
         fig_disp.update_layout(xaxis_title="Dispositivo", yaxis_title="Leads")
         st.plotly_chart(fig_disp, use_container_width=True)
 
     with col_g4:
         st.subheader("Horário dos Leads")
-        conv_hora = count_unique_leads_by(df_leads_all_filtrado, ["hora"]).sort_values("hora")
+        conv_hora = count_unique_leads_by(df_leads_with_time_filtrado, ["hora"]).sort_values("hora")
         fig_hora2 = px.bar(conv_hora, x="hora", y="leads")
         fig_hora2.update_layout(xaxis_title="Hora do dia", yaxis_title="Leads")
         st.plotly_chart(fig_hora2, use_container_width=True)
 
-    df_negocios_periodo = get_negocios_efetuados_df(df_opp_full, periodo_sel, hoje, ontem)
+    df_negocios_periodo = (
+        df_periodo_opportunities[df_periodo_opportunities["status_funil"].apply(is_negocio_efetuado)].copy()
+        if (not df_periodo_opportunities.empty and "status_funil" in df_periodo_opportunities.columns)
+        else pd.DataFrame()
+    )
     df_origem_table = build_origin_table(
         company_slug,
         df_filtrado,
@@ -1738,7 +2029,7 @@ def render_normal_mode(
         st.dataframe(df_camp_table, use_container_width=True, height=400)
 
     st.markdown("### Informações por Termos de Pesquisa")
-    df_terms_table = build_terms_table(df_leads_all_filtrado, df_opp_full)
+    df_terms_table = build_terms_table(df_leads_all_filtrado, df_periodo_opportunities)
     if df_terms_table.empty:
         st.info("Nenhuma palavra-chave válida encontrada no período filtrado.")
     else:
@@ -1800,16 +2091,17 @@ def render_compare_mode(
     min2, max2 = (df_m2["data"].min(), df_m2["data"].max()) if not df_m2.empty else ("-", "-")
     st.caption(f"Comparação: {m1_label}/{ano_sel} ({min1} a {max1}) vs {m2_label}/{ano_sel} ({min2} a {max2})")
 
-    leads_totais_1, leads_meta_1, leads_google_ads_1 = get_highlight_kpis(company_slug, df_m1, df_ig_m1, df_form_m1)
-    leads_totais_2, leads_meta_2, leads_google_ads_2 = get_highlight_kpis(company_slug, df_m2, df_ig_m2, df_form_m2)
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        render_kpi_dual("Leads totais", f"{leads_totais_1}", f"{leads_totais_2}", COMPARE_COLOR_1, COMPARE_COLOR_2)
-    with col2:
-        render_kpi_dual("Leads Meta", f"{leads_meta_1}", f"{leads_meta_2}", COMPARE_COLOR_1, COMPARE_COLOR_2)
-    with col3:
-        render_kpi_dual("Leads Google Ads", f"{leads_google_ads_1}", f"{leads_google_ads_2}", COMPARE_COLOR_1, COMPARE_COLOR_2)
+    render_compare_highlights(
+        company_slug,
+        df_m1,
+        df_ig_m1,
+        df_form_m1,
+        df_m1_opp,
+        df_m2,
+        df_ig_m2,
+        df_form_m2,
+        df_m2_opp,
+    )
 
     st.markdown("---")
     st.subheader("Leads por Dia")
@@ -1817,10 +2109,17 @@ def render_compare_mode(
     conv_por_dia_2 = count_unique_leads_by(df_m2_all, ["data"])
     fig = go.Figure()
     if not conv_por_dia_1.empty:
-        fig.add_trace(go.Scatter(x=conv_por_dia_1["data"], y=conv_por_dia_1["leads"], mode="lines", name=f"{m1_label}/{ano_sel}", line=dict(color=COMPARE_COLOR_1)))
+        fig.add_trace(go.Scatter(x=conv_por_dia_1["data"], y=conv_por_dia_1["leads"], mode="lines+markers", name=f"{m1_label}/{ano_sel}", line=dict(color=COMPARE_COLOR_1), marker=dict(size=6)))
     if not conv_por_dia_2.empty:
-        fig.add_trace(go.Scatter(x=conv_por_dia_2["data"], y=conv_por_dia_2["leads"], mode="lines", name=f"{m2_label}/{ano_sel}", line=dict(color=COMPARE_COLOR_2)))
-    fig.update_layout(xaxis_title="Data", yaxis_title="Leads")
+        fig.add_trace(go.Scatter(x=conv_por_dia_2["data"], y=conv_por_dia_2["leads"], mode="lines+markers", name=f"{m2_label}/{ano_sel}", line=dict(color=COMPARE_COLOR_2), marker=dict(size=6)))
+    fig.update_layout(
+        xaxis_title="Data",
+        yaxis_title="Leads",
+        height=360,
+        margin=dict(l=20, r=20, t=20, b=20),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
@@ -1831,9 +2130,9 @@ def render_compare_mode(
         render_central_funnel_compare(
             company_slug,
             dfs,
-            df_m1_leads_base,
-            df_ig_m1_base if not df_ig_m1_base.empty else None,
-            df_form_m1_base if not df_form_m1_base.empty else None,
+            df_m1,
+            df_ig_m1 if not df_ig_m1.empty else None,
+            df_form_m1 if not df_form_m1.empty else None,
             df_m1_opp,
             df_opp_full,
             ano_sel,
@@ -1845,9 +2144,9 @@ def render_compare_mode(
         render_central_funnel_compare(
             company_slug,
             dfs,
-            df_m2_leads_base,
-            df_ig_m2_base if not df_ig_m2_base.empty else None,
-            df_form_m2_base if not df_form_m2_base.empty else None,
+            df_m2,
+            df_ig_m2 if not df_ig_m2.empty else None,
+            df_form_m2 if not df_form_m2.empty else None,
             df_m2_opp,
             df_opp_full,
             ano_sel,
@@ -1883,9 +2182,9 @@ def render_compare_mode(
     col_g3, col_g4 = st.columns(2)
     with col_g3:
         st.subheader("Leads por Dispositivo")
-        d1 = count_unique_leads_by(df_m1_all, ["dispositivo"])
+        d1 = count_unique_leads_by(df_m1, ["dispositivo"])
         d1["mes"] = f"{m1_label}/{ano_sel}"
-        d2 = count_unique_leads_by(df_m2_all, ["dispositivo"])
+        d2 = count_unique_leads_by(df_m2, ["dispositivo"])
         d2["mes"] = f"{m2_label}/{ano_sel}"
         conv_disp = pd.concat([d1, d2], ignore_index=True)
         fig_disp = px.bar(conv_disp, x="dispositivo", y="leads", color="mes", barmode="group", color_discrete_map={f"{m1_label}/{ano_sel}": COMPARE_COLOR_1, f"{m2_label}/{ano_sel}": COMPARE_COLOR_2})
@@ -1893,9 +2192,11 @@ def render_compare_mode(
 
     with col_g4:
         st.subheader("Horário dos Leads")
-        h1 = count_unique_leads_by(df_m1_all, ["hora"])
+        df_m1_time = concat_non_empty([df_m1, df_form_m1 if company_slug == "nextqs" else pd.DataFrame()])
+        df_m2_time = concat_non_empty([df_m2, df_form_m2 if company_slug == "nextqs" else pd.DataFrame()])
+        h1 = count_unique_leads_by(df_m1_time, ["hora"])
         h1["mes"] = f"{m1_label}/{ano_sel}"
-        h2 = count_unique_leads_by(df_m2_all, ["hora"])
+        h2 = count_unique_leads_by(df_m2_time, ["hora"])
         h2["mes"] = f"{m2_label}/{ano_sel}"
         conv_hora = pd.concat([h1, h2], ignore_index=True)
         fig_hora = px.bar(conv_hora, x="hora", y="leads", color="mes", barmode="group", color_discrete_map={f"{m1_label}/{ano_sel}": COMPARE_COLOR_1, f"{m2_label}/{ano_sel}": COMPARE_COLOR_2})
@@ -2150,8 +2451,8 @@ elif periodo_sel == "Comparar meses":
         trigger_sheet_reload()
 
 if not compare_mode:
-    df_periodo_leads_meta_whatsapp_empty_check = get_period_filtered_df(dfs.get("leads_meta_whatsapp", pd.DataFrame()), periodo_sel, hoje, ontem)
-    df_periodo_leads_meta_formulario_empty_check = get_period_filtered_df(dfs.get("leads_meta_formulario", pd.DataFrame()), periodo_sel, hoje, ontem)
+    df_periodo_leads_meta_whatsapp_empty_check = get_effective_period_filtered_df(dfs.get("leads_meta_whatsapp", pd.DataFrame()), periodo_sel, hoje, ontem)
+    df_periodo_leads_meta_formulario_empty_check = get_effective_period_filtered_df(dfs.get("leads_meta_formulario", pd.DataFrame()), periodo_sel, hoje, ontem)
     if df_periodo_leads.empty and (
         company_slug != "nextqs"
         or (df_periodo_leads_meta_whatsapp_empty_check.empty and df_periodo_leads_meta_formulario_empty_check.empty)
@@ -2186,10 +2487,10 @@ if compare_mode and st.session_state.get("compare_aplicado", False):
     df_for_filters = pd.concat(df_filter_frames, ignore_index=True).sort_values("data_hora")
 else:
     df_filter_frames = [df_periodo_leads]
-    df_periodo_leads_meta_whatsapp_sidebar = get_period_filtered_df(dfs.get("leads_meta_whatsapp", pd.DataFrame()), periodo_sel, hoje, ontem)
+    df_periodo_leads_meta_whatsapp_sidebar = get_effective_period_filtered_df(dfs.get("leads_meta_whatsapp", pd.DataFrame()), periodo_sel, hoje, ontem)
     if company_slug == "nextqs" and not df_periodo_leads_meta_whatsapp_sidebar.empty:
         df_filter_frames.append(df_periodo_leads_meta_whatsapp_sidebar)
-    df_periodo_leads_meta_formulario_sidebar = get_period_filtered_df(dfs.get("leads_meta_formulario", pd.DataFrame()), periodo_sel, hoje, ontem)
+    df_periodo_leads_meta_formulario_sidebar = get_effective_period_filtered_df(dfs.get("leads_meta_formulario", pd.DataFrame()), periodo_sel, hoje, ontem)
     if company_slug == "nextqs" and not df_periodo_leads_meta_formulario_sidebar.empty:
         df_filter_frames.append(df_periodo_leads_meta_formulario_sidebar)
     df_for_filters = pd.concat(df_filter_frames, ignore_index=True).sort_values("data_hora")
