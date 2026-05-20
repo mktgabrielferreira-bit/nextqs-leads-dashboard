@@ -1280,7 +1280,12 @@ def get_opportunity_metrics(df_opportunities: pd.DataFrame) -> dict[str, str]:
     }
 
 
-def origin_value_html(value: str, color: str, size_css: str = "clamp(20px, 2.2vw, 32px)") -> str:
+def origin_value_html(
+    value: str,
+    color: str,
+    size_css: str = "clamp(20px, 2.2vw, 32px)",
+    image_height_px: int = 64,
+) -> str:
     icon_uri = get_origin_icon_data_uri(value)
     if not icon_uri:
         return (
@@ -1289,9 +1294,10 @@ def origin_value_html(value: str, color: str, size_css: str = "clamp(20px, 2.2vw
         )
 
     return (
-        "<div style='display: flex; align-items: center; min-width: 0;'>"
+        "<div style='display: flex; align-items: center; min-width: 0; width: 100%;'>"
         f"<img src='{icon_uri}' alt='{html.escape(str(value))}' "
-        "style='height: 48px; max-width: 180px; width: auto; object-fit: contain;' />"
+        f"style='height: {int(image_height_px)}px; width: 100%; object-fit: cover; "
+        "object-position: center; border-radius: 6px;' />"
         "</div>"
     )
 
@@ -1378,12 +1384,12 @@ def render_highlights(
 
 def render_compare_highlight_card(label: str, value_1: str, value_2: str, color_1: str, color_2: str):
     value_1_html = (
-        origin_value_html(value_1, color_1, "clamp(18px, 1.7vw, 28px)")
+        origin_value_html(value_1, color_1, "clamp(18px, 1.7vw, 28px)", image_height_px=42)
         if label == "Origem mais comum"
         else f"<div style='font-size: clamp(18px, 1.7vw, 28px); font-weight: 800; color: {color_1}; line-height: 1.1; overflow-wrap: anywhere;'>{html.escape(str(value_1))}</div>"
     )
     value_2_html = (
-        origin_value_html(value_2, color_2, "clamp(18px, 1.7vw, 28px)")
+        origin_value_html(value_2, color_2, "clamp(18px, 1.7vw, 28px)", image_height_px=42)
         if label == "Origem mais comum"
         else f"<div style='font-size: clamp(18px, 1.7vw, 28px); font-weight: 800; color: {color_2}; line-height: 1.1; overflow-wrap: anywhere;'>{html.escape(str(value_2))}</div>"
     )
