@@ -1,5 +1,4 @@
 import io
-import base64
 import html
 import re
 import unicodedata
@@ -1240,25 +1239,6 @@ def get_common_origin(
     return unique["_origin_group"].value_counts().index[0]
 
 
-def image_data_uri(path: str) -> str | None:
-    image_path = Path(path)
-    if not image_path.exists():
-        return None
-    suffix = image_path.suffix.lower().lstrip(".")
-    mime = "jpeg" if suffix in {"jpg", "jpeg"} else suffix
-    data = base64.b64encode(image_path.read_bytes()).decode("ascii")
-    return f"data:image/{mime};base64,{data}"
-
-
-def get_origin_icon_data_uri(origin: str) -> str | None:
-    origin_norm = strip_accents(origin)
-    if "google ads" in origin_norm:
-        return image_data_uri("assets/google_ads.png")
-    if "meta" in origin_norm:
-        return image_data_uri("assets/meta_ads.png")
-    return None
-
-
 def get_opportunity_metrics(df_opportunities: pd.DataFrame) -> dict[str, str]:
     if df_opportunities is None:
         df_opportunities = pd.DataFrame()
@@ -1280,36 +1260,10 @@ def get_opportunity_metrics(df_opportunities: pd.DataFrame) -> dict[str, str]:
     }
 
 
-def origin_value_html(
-    value: str,
-    color: str,
-    size_css: str = "clamp(20px, 2.2vw, 32px)",
-    image_height_px: int = 64,
-) -> str:
-    icon_uri = get_origin_icon_data_uri(value)
-    if not icon_uri:
-        return (
-            f"<div style='font-size: {size_css}; font-weight: 800; color: {color}; "
-            f"line-height: 1.05; overflow-wrap: anywhere;'>{html.escape(str(value))}</div>"
-        )
-
-    return (
-        "<div style='display: flex; align-items: center; min-width: 0; width: 100%;'>"
-        f"<img src='{icon_uri}' alt='{html.escape(str(value))}' "
-        f"style='height: {int(image_height_px)}px; width: 100%; object-fit: cover; "
-        "object-position: center; border-radius: 6px;' />"
-        "</div>"
-    )
-
-
 def render_highlight_card(label: str, value: str, color: str = GREEN_COLOR):
     value_html = (
-        origin_value_html(value, color)
-        if label == "Origem mais comum"
-        else (
-            f"<div style='font-size: clamp(20px, 2.2vw, 32px); font-weight: 800; color: {color}; "
-            f"line-height: 1.05; overflow-wrap: anywhere;'>{html.escape(str(value))}</div>"
-        )
+        f"<div style='font-size: clamp(20px, 2.2vw, 32px); font-weight: 800; color: {color}; "
+        f"line-height: 1.05; overflow-wrap: anywhere;'>{html.escape(str(value))}</div>"
     )
 
     st.markdown(
@@ -1383,16 +1337,8 @@ def render_highlights(
 
 
 def render_compare_highlight_card(label: str, value_1: str, value_2: str, color_1: str, color_2: str):
-    value_1_html = (
-        origin_value_html(value_1, color_1, "clamp(18px, 1.7vw, 28px)", image_height_px=42)
-        if label == "Origem mais comum"
-        else f"<div style='font-size: clamp(18px, 1.7vw, 28px); font-weight: 800; color: {color_1}; line-height: 1.1; overflow-wrap: anywhere;'>{html.escape(str(value_1))}</div>"
-    )
-    value_2_html = (
-        origin_value_html(value_2, color_2, "clamp(18px, 1.7vw, 28px)", image_height_px=42)
-        if label == "Origem mais comum"
-        else f"<div style='font-size: clamp(18px, 1.7vw, 28px); font-weight: 800; color: {color_2}; line-height: 1.1; overflow-wrap: anywhere;'>{html.escape(str(value_2))}</div>"
-    )
+    value_1_html = f"<div style='font-size: clamp(18px, 1.7vw, 28px); font-weight: 800; color: {color_1}; line-height: 1.1; overflow-wrap: anywhere;'>{html.escape(str(value_1))}</div>"
+    value_2_html = f"<div style='font-size: clamp(18px, 1.7vw, 28px); font-weight: 800; color: {color_2}; line-height: 1.1; overflow-wrap: anywhere;'>{html.escape(str(value_2))}</div>"
 
     st.markdown(
         f"""
