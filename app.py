@@ -1,5 +1,4 @@
 import io
-import base64
 import html
 import re
 import unicodedata
@@ -140,58 +139,6 @@ def render_company_switcher(current_slug: str):
             st.query_params["empresa"] = "starled"
             load_sheet.clear()
             st.rerun()
-
-
-def first_existing_path(paths: list[str]) -> Path | None:
-    for path in paths:
-        item = Path(path)
-        if item.exists():
-            return item
-    return None
-
-
-def image_data_uri(path: Path) -> str | None:
-    if path is None or not path.exists():
-        return None
-    suffix = path.suffix.lower().lstrip(".")
-    mime = "jpeg" if suffix in {"jpg", "jpeg"} else suffix
-    data = base64.b64encode(path.read_bytes()).decode("ascii")
-    return f"data:image/{mime};base64,{data}"
-
-
-def render_partner_logos():
-    logos = [
-        ("SMARK", first_existing_path(["assets/smark.png"])),
-        ("Google Ads", first_existing_path(["assets/google_ads.png", "assets/google _ads.png"])),
-        ("Meta", first_existing_path(["assets/meta.png"])),
-    ]
-    logo_html = []
-    for alt, path in logos:
-        uri = image_data_uri(path) if path else None
-        if not uri:
-            continue
-        logo_html.append(
-            f"<img src='{uri}' alt='{html.escape(alt)}' "
-            "style='height: 52px; max-width: 210px; object-fit: contain;' />"
-        )
-
-    if not logo_html:
-        return
-
-    st.markdown(
-        f"""
-        <div style="
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 34px;
-            margin: 8px 0 22px 0;
-            flex-wrap: wrap;">
-            {''.join(logo_html)}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 def normalize_empty(value):
@@ -1378,12 +1325,10 @@ def get_opportunity_metrics(df_opportunities: pd.DataFrame) -> dict[str, str]:
     negocio_rate = (negocio_count / opp_count) if opp_count else None
 
     segmento_col = first_matching_col(df_opportunities, ["area_atuação", "area_atuacao", "Área de Atuação"])
-    consultor_col = first_matching_col(df_opportunities, ["consultor", "Nome Colaborador Responsável"])
 
     return {
         "oportunidades": str(opp_count),
         "segmento": mode_text(df_opportunities, segmento_col),
-        "consultor": mode_text(df_opportunities, consultor_col),
         "taxa_negocios": format_percent(negocio_rate),
         "tempo_oportunidade": format_avg_days(average_days_between(df_opportunities, "data_lead", "data_oportunidade")),
         "tempo_encerramento": format_avg_days(average_days_between(df_opportunities, "data_oportunidade", "data_encerramento")),
@@ -1429,16 +1374,19 @@ def get_highlight_cards(
         df_leads_meta_formulario,
     )
     opp_metrics = get_opportunity_metrics(df_opportunities_periodo)
+    leads_count = count_unique_leads(df_leads_all)
+    oportunidades_count = int(opp_metrics["oportunidades"])
+    taxa_oportunidades = (oportunidades_count / leads_count) if leads_count else None
 
     return [
-        ("Leads", str(count_unique_leads(df_leads_all))),
+        ("Leads", str(leads_count)),
         ("Oportunidades", opp_metrics["oportunidades"]),
-        ("Origem mais comum", get_common_origin(company_slug, df_leads_site, df_leads_meta_whatsapp, df_leads_meta_formulario)),
-        ("Segmento mais comum", opp_metrics["segmento"]),
-        ("Taxa de Negócios Efetuados", opp_metrics["taxa_negocios"]),
-        ("Tempo Médio Oportunidade", opp_metrics["tempo_oportunidade"]),
-        ("Tempo Médio Encerramento", opp_metrics["tempo_encerramento"]),
-        ("Consultor com mais oportunidades", opp_metrics["consultor"]),
+        ("Origem principal", get_common_origin(company_slug, df_leads_site, df_leads_meta_whatsapp, df_leads_meta_formulario)),
+        ("Segmento principal", opp_metrics["segmento"]),
+        ("Taxa de oportunidades", format_percent(taxa_oportunidades)),
+        ("Taxa de negócios efetuados", opp_metrics["taxa_negocios"]),
+        ("Tempo médio oportunidade", opp_metrics["tempo_oportunidade"]),
+        ("Tempo médio encerramento", opp_metrics["tempo_encerramento"]),
     ]
 
 
@@ -2499,7 +2447,6 @@ for name in OPTIONAL_SHEETS:
 df_leads = dfs["leads_site"]
 df_opportunities = dfs["oportunidades"]
 
-render_partner_logos()
 render_company_switcher(company_slug)
 
 if df_leads.empty:
