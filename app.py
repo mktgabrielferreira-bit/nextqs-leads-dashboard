@@ -1,4 +1,5 @@
 import io
+import base64
 import html
 import re
 import unicodedata
@@ -139,6 +140,58 @@ def render_company_switcher(current_slug: str):
             st.query_params["empresa"] = "starled"
             load_sheet.clear()
             st.rerun()
+
+
+def first_existing_path(paths: list[str]) -> Path | None:
+    for path in paths:
+        item = Path(path)
+        if item.exists():
+            return item
+    return None
+
+
+def image_data_uri(path: Path) -> str | None:
+    if path is None or not path.exists():
+        return None
+    suffix = path.suffix.lower().lstrip(".")
+    mime = "jpeg" if suffix in {"jpg", "jpeg"} else suffix
+    data = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:image/{mime};base64,{data}"
+
+
+def render_partner_logos():
+    logos = [
+        ("SMARK", first_existing_path(["assets/smark.png"])),
+        ("Google Ads", first_existing_path(["assets/google_ads.png", "assets/google _ads.png"])),
+        ("Meta", first_existing_path(["assets/meta.png"])),
+    ]
+    logo_html = []
+    for alt, path in logos:
+        uri = image_data_uri(path) if path else None
+        if not uri:
+            continue
+        logo_html.append(
+            f"<img src='{uri}' alt='{html.escape(alt)}' "
+            "style='height: 52px; max-width: 210px; object-fit: contain;' />"
+        )
+
+    if not logo_html:
+        return
+
+    st.markdown(
+        f"""
+        <div style="
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 34px;
+            margin: 8px 0 22px 0;
+            flex-wrap: wrap;">
+            {''.join(logo_html)}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def normalize_empty(value):
@@ -981,9 +1034,9 @@ def get_period_filtered_df(df_src: pd.DataFrame, periodo_sel: str, hoje: date, o
         return df_src[df_src["data"] == hoje].copy()
     if periodo_sel == "Ontem":
         return df_src[df_src["data"] == ontem].copy()
-    if periodo_sel == "Últimos 7 dias":
-        start = hoje - timedelta(days=7)
-        end = ontem
+    if periodo_sel == "Últimos 30 dias":
+        start = hoje - timedelta(days=29)
+        end = hoje
         return df_src[(df_src["data"] >= start) & (df_src["data"] <= end)].copy()
     if periodo_sel == "Este mês":
         start = date(hoje.year, hoje.month, 1)
@@ -1004,8 +1057,85 @@ def get_effective_period_filtered_df(df_src: pd.DataFrame, periodo_sel: str, hoj
                 int(st.session_state.get("custom_ano", hoje.year)),
                 st.session_state.get("custom_mes_label", "Todo o ano"),
             )
-        return get_period_filtered_df(df_src, "Últimos 7 dias", hoje, ontem)
+        return get_period_filtered_df(df_src, "Últimos 30 dias", hoje, ontem)
     return get_period_filtered_df(df_src, periodo_sel, hoje, ontem)
+
+
+def format_period_date(value: date) -> str:
+    return value.strftime("%d/%m/%Y")
+
+
+def last_day_of_month(year: int, month: int) -> date:
+    if month == 12:
+        return date(year, 12, 31)
+    return date(year, month + 1, 1) - timedelta(days=1)
+
+
+def get_period_label(periodo_sel: str, hoje: date, ontem: date) -> str:
+    if periodo_sel == "Hoje":
+        return "Período: Hoje"
+    if periodo_sel == "Ontem":
+        return "Período: Ontem"
+    if periodo_sel == "Últimos 30 dias":
+        start = hoje - timedelta(days=29)
+        return f"Período: {format_period_date(start)} a {format_period_date(hoje)}"
+    if periodo_sel == "Este mês":
+        start = date(hoje.year, hoje.month, 1)
+        return f"Período: {format_period_date(start)} a {format_period_date(hoje)}"
+    if periodo_sel == "Este ano":
+        start = date(hoje.year, 1, 1)
+        return f"Período: {format_period_date(start)} a {format_period_date(hoje)}"
+    if periodo_sel == "Personalizado" and st.session_state.get("custom_aplicado", False):
+        custom_ano = int(st.session_state.get("custom_ano", hoje.year))
+        custom_mes_label = st.session_state.get("custom_mes_label", "Todo o ano")
+        if custom_mes_label == "Todo o ano":
+            start = date(custom_ano, 1, 1)
+            end = hoje if custom_ano == hoje.year else date(custom_ano, 12, 31)
+        else:
+            mes_num = month_label_to_num(custom_mes_label)
+            start = date(custom_ano, mes_num, 1)
+            end = hoje if (custom_ano == hoje.year and mes_num == hoje.month) else last_day_of_month(custom_ano, mes_num)
+        return f"Período: {format_period_date(start)} a {format_period_date(end)}"
+    if periodo_sel == "Personalizado":
+        start = hoje - timedelta(days=29)
+        return f"Período: {format_period_date(start)} a {format_period_date(hoje)}"
+    return "Período: Todos os dados"
+
+
+def render_period_label(periodo_sel: str, hoje: date, ontem: date):
+    st.markdown(
+        f"""
+        <div style="
+            margin: 12px 0 2px 0;
+            font-size: 14px;
+            font-weight: 700;
+            opacity: 0.82;">
+            {html.escape(get_period_label(periodo_sel, hoje, ontem))}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_compare_period_label(ano: int, m1_label: str, m2_label: str):
+    def _range(month_label: str) -> str:
+        month = month_label_to_num(month_label)
+        start = date(int(ano), month, 1)
+        end = last_day_of_month(int(ano), month)
+        return f"{format_period_date(start)} a {format_period_date(end)}"
+
+    st.markdown(
+        f"""
+        <div style="
+            margin: 12px 0 2px 0;
+            font-size: 14px;
+            font-weight: 700;
+            opacity: 0.82;">
+            {html.escape(f"Período: {_range(m1_label)} vs {_range(m2_label)}")}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def apply_extra_filters_leads(df_base: pd.DataFrame, eventos_sel, origens_sel, dispositivos_sel) -> pd.DataFrame:
@@ -1554,9 +1684,9 @@ def get_negocios_efetuados_count(df_opp_full: pd.DataFrame, periodo_sel: str, ho
         return len(df_neg[df_neg["data_enc_date"] == hoje])
     if periodo_sel == "Ontem":
         return len(df_neg[df_neg["data_enc_date"] == ontem])
-    if periodo_sel == "Últimos 7 dias":
-        start = hoje - timedelta(days=7)
-        return len(df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= ontem)])
+    if periodo_sel == "Últimos 30 dias":
+        start = hoje - timedelta(days=29)
+        return len(df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= hoje)])
     if periodo_sel == "Este mês":
         start = date(hoje.year, hoje.month, 1)
         return len(df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= hoje)])
@@ -1710,9 +1840,9 @@ def get_negocios_efetuados_df(df_opp_full: pd.DataFrame, periodo_sel: str, hoje:
         return df_neg[df_neg["data_enc_date"] == hoje].copy()
     if periodo_sel == "Ontem":
         return df_neg[df_neg["data_enc_date"] == ontem].copy()
-    if periodo_sel == "Últimos 7 dias":
-        start = hoje - timedelta(days=7)
-        return df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= ontem)].copy()
+    if periodo_sel == "Últimos 30 dias":
+        start = hoje - timedelta(days=29)
+        return df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= hoje)].copy()
     if periodo_sel == "Este mês":
         start = date(hoje.year, hoje.month, 1)
         return df_neg[(df_neg["data_enc_date"] >= start) & (df_neg["data_enc_date"] <= hoje)].copy()
@@ -1932,6 +2062,7 @@ def render_normal_mode(
         df_leads_meta_formulario_filtrado,
         df_periodo_opportunities,
     )
+    render_period_label(periodo_sel, hoje, ontem)
 
     st.markdown("---")
 
@@ -2105,6 +2236,7 @@ def render_compare_mode(
         df_form_m2,
         df_m2_opp,
     )
+    render_compare_period_label(ano_sel, m1_label, m2_label)
 
     st.markdown("---")
     st.subheader("Leads por Dia")
@@ -2367,14 +2499,17 @@ for name in OPTIONAL_SHEETS:
 df_leads = dfs["leads_site"]
 df_opportunities = dfs["oportunidades"]
 
+render_partner_logos()
 render_company_switcher(company_slug)
 
 if df_leads.empty:
     st.warning(f"Nenhum dado encontrado na aba 'leads_site' da planilha {company['nome']}.")
     st.stop()
 
-PERIODOS = ["Hoje", "Ontem", "Últimos 7 dias", "Este mês", "Este ano", "Personalizado", "Comparar meses"]
-st.session_state.setdefault("periodo_sel", "Últimos 7 dias")
+PERIODOS = ["Hoje", "Ontem", "Últimos 30 dias", "Este mês", "Este ano", "Personalizado", "Comparar meses"]
+if st.session_state.get("periodo_sel") == "Últimos 7 dias":
+    st.session_state["periodo_sel"] = "Últimos 30 dias"
+st.session_state.setdefault("periodo_sel", "Últimos 30 dias")
 st.session_state.setdefault("periodo_sel_prev", st.session_state["periodo_sel"])
 
 periodo_sel = st.sidebar.radio(label="", options=PERIODOS, key="periodo_sel")
@@ -2423,9 +2558,9 @@ if periodo_sel == "Personalizado":
             else:
                 df_periodo_opportunities = df_opportunities
     else:
-        df_periodo_leads = get_period_filtered_df(df_leads, "Últimos 7 dias", hoje, ontem)
-        df_periodo_sessions = get_period_filtered_df(dfs["sessions"], "Últimos 7 dias", hoje, ontem)
-        df_periodo_opportunities = get_period_filtered_df(df_opportunities, "Últimos 7 dias", hoje, ontem)
+        df_periodo_leads = get_period_filtered_df(df_leads, "Últimos 30 dias", hoje, ontem)
+        df_periodo_sessions = get_period_filtered_df(dfs["sessions"], "Últimos 30 dias", hoje, ontem)
+        df_periodo_opportunities = get_period_filtered_df(df_opportunities, "Últimos 30 dias", hoje, ontem)
 
 elif periodo_sel == "Comparar meses":
     compare_mode = True
