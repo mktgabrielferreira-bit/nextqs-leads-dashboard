@@ -4,6 +4,7 @@ import re
 import unicodedata
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 from zoneinfo import ZoneInfo
 
 import gspread
@@ -1217,6 +1218,10 @@ def is_negocio_efetuado(value) -> bool:
     return strip_accents(value) == "negocio efetuado"
 
 
+def is_negocio_nao_efetuado(value) -> bool:
+    return strip_accents(value) == "negocio nao efetuado"
+
+
 def first_matching_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     if df is None or df.empty:
         return None
@@ -1963,6 +1968,90 @@ def build_terms_table(
     return leads_por_term.sort_values("Leads", ascending=False).reset_index(drop=True)
 
 
+def normalize_conversion_page(value) -> str:
+    text = normalize_text(value)
+    if not text:
+        return ""
+
+    if re.match(r"^https?://", text, flags=re.IGNORECASE):
+        parsed = urlparse(text)
+        path = parsed.path
+    elif text.startswith("www.") or text.startswith("nextqs.com") or text.startswith("starled.com"):
+        parsed = urlparse(f"https://{text}")
+        path = parsed.path
+    else:
+        path = text.split("?", 1)[0]
+
+    page = unquote(path).strip("/")
+    return "Home" if not page else page
+
+
+def build_pages_conversion_table(df_leads_site: pd.DataFrame) -> pd.DataFrame:
+    if df_leads_site is None or df_leads_site.empty or "page_conversao" not in df_leads_site.columns:
+        return pd.DataFrame(columns=["Páginas", "Conversões"])
+
+    out = df_leads_site.copy()
+    out["Páginas"] = out["page_conversao"].apply(normalize_conversion_page)
+    out = out[out["Páginas"] != ""].copy()
+    if out.empty:
+        return pd.DataFrame(columns=["Páginas", "Conversões"])
+
+    return (
+        out.groupby("Páginas")
+        .size()
+        .reset_index(name="Conversões")
+        .sort_values(["Conversões", "Páginas"], ascending=[False, True])
+        .reset_index(drop=True)
+    )
+
+
+def build_consultor_table(df_opportunities: pd.DataFrame) -> pd.DataFrame:
+    columns = ["Nome do consultor", "Oportunidades", "Negócio não efetuado", "Negócio efetuado"]
+    if df_opportunities is None or df_opportunities.empty:
+        return pd.DataFrame(columns=columns)
+
+    consultor_col = first_matching_col(df_opportunities, ["consultor", "Nome Colaborador Responsável"])
+    oportunidade_col = first_matching_col(df_opportunities, ["oportunidade", "Cod. Oportunidade"])
+    status_col = first_matching_col(df_opportunities, ["status_funil", "Funil de Venda"])
+    if not consultor_col:
+        return pd.DataFrame(columns=columns)
+
+    out = df_opportunities.copy()
+    out["Nome do consultor"] = out[consultor_col].apply(normalize_text)
+    out = out[out["Nome do consultor"] != ""].copy()
+    if out.empty:
+        return pd.DataFrame(columns=columns)
+
+    if oportunidade_col:
+        out["_opp_key"] = out[oportunidade_col].apply(normalize_text)
+        empty_mask = out["_opp_key"].eq("")
+        if empty_mask.any():
+            out.loc[empty_mask, "_opp_key"] = [f"sem_codigo_{idx}" for idx in out[empty_mask].index]
+    else:
+        out["_opp_key"] = [f"linha_{idx}" for idx in out.index]
+
+    if status_col:
+        out["_negocio_nao_efetuado"] = out[status_col].apply(is_negocio_nao_efetuado).astype(int)
+        out["_negocio_efetuado"] = out[status_col].apply(is_negocio_efetuado).astype(int)
+    else:
+        out["_negocio_nao_efetuado"] = 0
+        out["_negocio_efetuado"] = 0
+
+    return (
+        out.groupby("Nome do consultor")
+        .agg(
+            Oportunidades=("_opp_key", "nunique"),
+            **{
+                "Negócio não efetuado": ("_negocio_nao_efetuado", "sum"),
+                "Negócio efetuado": ("_negocio_efetuado", "sum"),
+            },
+        )
+        .reset_index()
+        .sort_values(["Oportunidades", "Negócio efetuado", "Nome do consultor"], ascending=[False, False, True])
+        .reset_index(drop=True)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Render modes
 # ---------------------------------------------------------------------------
@@ -2118,9 +2207,19 @@ def render_normal_mode(
         st.dataframe(df_terms_table, use_container_width=True, height=400)
 
     st.markdown("---")
-    st.subheader("Dados detalhados (após filtros)")
-    detail_columns = [c for c in ["data_hora", "evento", "dispositivo", "origem", "user_id_email", "ip_address"] if c in df_leads_all_filtrado.columns]
-    st.dataframe(df_leads_all_filtrado[detail_columns], use_container_width=True)
+    st.subheader("Páginas do site com mais conversões")
+    df_pages_table = build_pages_conversion_table(df_filtrado)
+    if df_pages_table.empty:
+        st.info("Nenhuma página de conversão encontrada no período filtrado.")
+    else:
+        st.dataframe(df_pages_table, use_container_width=True, height=360)
+
+    st.subheader("Informações por consultor")
+    df_consultor_table = build_consultor_table(df_periodo_opportunities)
+    if df_consultor_table.empty:
+        st.info("Nenhuma informação de consultor encontrada no período filtrado.")
+    else:
+        st.dataframe(df_consultor_table, use_container_width=True, height=360)
 
 
 
