@@ -2006,7 +2006,7 @@ def build_pages_conversion_table(df_leads_site: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_consultor_table(df_opportunities: pd.DataFrame) -> pd.DataFrame:
-    columns = ["Nome do consultor", "Oportunidades", "Negócio não efetuado", "Negócio efetuado"]
+    columns = ["Nome do consultor", "Oportunidades", "Negócios não efetuados", "Negócios efetuados"]
     if df_opportunities is None or df_opportunities.empty:
         return pd.DataFrame(columns=columns)
 
@@ -2042,12 +2042,12 @@ def build_consultor_table(df_opportunities: pd.DataFrame) -> pd.DataFrame:
         .agg(
             Oportunidades=("_opp_key", "nunique"),
             **{
-                "Negócio não efetuado": ("_negocio_nao_efetuado", "sum"),
-                "Negócio efetuado": ("_negocio_efetuado", "sum"),
+                "Negócios não efetuados": ("_negocio_nao_efetuado", "sum"),
+                "Negócios efetuados": ("_negocio_efetuado", "sum"),
             },
         )
         .reset_index()
-        .sort_values(["Oportunidades", "Negócio efetuado", "Nome do consultor"], ascending=[False, False, True])
+        .sort_values(["Oportunidades", "Negócios efetuados", "Nome do consultor"], ascending=[False, False, True])
         .reset_index(drop=True)
     )
 
