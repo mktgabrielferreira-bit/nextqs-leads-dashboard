@@ -116,30 +116,23 @@ def get_selected_company() -> dict:
     return COMPANIES[empresa]
 
 
-def render_company_switcher(current_slug: str):
-    col1, col2 = st.columns(2)
+def render_company_selector(current_slug: str):
+    def _select_company(slug: str):
+        st.query_params["empresa"] = slug
+        st.rerun()
 
-    with col1:
-        if st.button(
-            "NextQS",
-            use_container_width=True,
-            disabled=current_slug == "nextqs",
-            type="primary" if current_slug == "nextqs" else "secondary",
-        ):
-            st.query_params["empresa"] = "nextqs"
-            load_sheet.clear()
-            st.rerun()
-
-    with col2:
-        if st.button(
-            "StarLed",
-            use_container_width=True,
-            disabled=current_slug == "starled",
-            type="primary" if current_slug == "starled" else "secondary",
-        ):
-            st.query_params["empresa"] = "starled"
-            load_sheet.clear()
-            st.rerun()
+    if hasattr(st, "popover"):
+        with st.popover("Selecionar Empresa", use_container_width=True):
+            if st.button("NEXTQS", use_container_width=True, disabled=current_slug == "nextqs"):
+                _select_company("nextqs")
+            if st.button("STARLED", use_container_width=True, disabled=current_slug == "starled"):
+                _select_company("starled")
+    else:
+        with st.expander("Selecionar Empresa", expanded=False):
+            if st.button("NEXTQS", use_container_width=True, disabled=current_slug == "nextqs"):
+                _select_company("nextqs")
+            if st.button("STARLED", use_container_width=True, disabled=current_slug == "starled"):
+                _select_company("starled")
 
 
 def normalize_empty(value):
@@ -912,7 +905,7 @@ def _standardize_common_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-@st.cache_data
+@st.cache_data(show_spinner=False, ttl=300)
 def load_sheet(company_slug: str, sheet_name: str) -> pd.DataFrame:
     try:
         ws = get_base_spreadsheet(company_slug).worksheet(sheet_name)
@@ -2482,6 +2475,7 @@ with st.sidebar:
                         send_smark_clicked = st.form_submit_button("Enviar", use_container_width=True)
 
     refresh_clicked = st.button("Atualizar Dashboard", use_container_width=True)
+    render_company_selector(company_slug)
 
     if ultima_data_smark:
         st.markdown(
@@ -2516,15 +2510,25 @@ if send_smark_clicked:
                 if upload_result["ultima_data"]:
                     st.session_state["ultima_data_smark"] = upload_result["ultima_data"]
 
-                with st.spinner(f"Sincronizando oportunidades da {company['nome']}..."):
-                    sync_result = sync_opportunities_with_smark(company_slug)
+                with st.spinner("Sincronizando oportunidades da NextQS e StarLed..."):
+                    sync_results = {
+                        slug: sync_opportunities_with_smark(slug)
+                        for slug in COMPANIES.keys()
+                    }
                     load_sheet.clear()
+                    sync_summary = " | ".join(
+                        (
+                            f"{COMPANIES[slug]['nome']}: "
+                            f"site {result['site_matches']}, "
+                            f"Meta WhatsApp {result['instagram_matches']}, "
+                            f"Meta Formulário {result['formulario_matches']}, "
+                            f"oportunidades {result['opportunities_added']}"
+                        )
+                        for slug, result in sync_results.items()
+                    )
                     st.session_state["sync_message"] = (
-                        f"CSV enviado com sucesso ({upload_result['rows']} linhas) para {company['nome']}. "
-                        f"Matches site: {sync_result['site_matches']}. "
-                        f"Matches Meta WhatsApp: {sync_result['instagram_matches']}. "
-                        f"Matches Meta Formulário: {sync_result['formulario_matches']}. "
-                        f"Oportunidades regravadas: {sync_result['opportunities_added']}."
+                        f"CSV enviado com sucesso ({upload_result['rows']} linhas). "
+                        f"Sincronização concluída nas duas empresas. {sync_summary}."
                     )
                     st.session_state["open_upload_panel"] = False
                     st.rerun()
@@ -2537,16 +2541,12 @@ if refresh_clicked:
         st.session_state["ultima_data_smark"] = ultima_data_refresh
     trigger_sheet_reload()
 
-st.sidebar.markdown("## Filtros")
-
 dfs = {name: load_sheet(company_slug, name) for name in SHEETS_REQUIRED}
 for name in OPTIONAL_SHEETS:
     dfs[name] = load_sheet(company_slug, name)
 
 df_leads = dfs["leads_site"]
 df_opportunities = dfs["oportunidades"]
-
-render_company_switcher(company_slug)
 
 if df_leads.empty:
     st.warning(f"Nenhum dado encontrado na aba 'leads_site' da planilha {company['nome']}.")
@@ -2558,10 +2558,10 @@ if st.session_state.get("periodo_sel") == "Últimos 7 dias":
 st.session_state.setdefault("periodo_sel", "Últimos 30 dias")
 st.session_state.setdefault("periodo_sel_prev", st.session_state["periodo_sel"])
 
-periodo_sel = st.sidebar.radio(label="", options=PERIODOS, key="periodo_sel")
+st.sidebar.markdown("<h2 style='margin-bottom: 0.25rem;'>Filtros</h2>", unsafe_allow_html=True)
+periodo_sel = st.sidebar.radio(label="Período", options=PERIODOS, key="periodo_sel", label_visibility="collapsed")
 if periodo_sel != st.session_state.get("periodo_sel_prev"):
     st.session_state["periodo_sel_prev"] = periodo_sel
-    trigger_sheet_reload()
 
 hoje = get_today_local()
 ontem = hoje - timedelta(days=1)
@@ -2588,7 +2588,6 @@ if periodo_sel == "Personalizado":
     st.session_state.setdefault("custom_aplicado", False)
     if aplicar:
         st.session_state["custom_aplicado"] = True
-        trigger_sheet_reload()
 
     if st.session_state.get("custom_aplicado", False):
         if custom_mes_label == "Todo o ano":
@@ -2632,7 +2631,6 @@ elif periodo_sel == "Comparar meses":
     st.session_state.setdefault("compare_aplicado", False)
     if aplicar_compare:
         st.session_state["compare_aplicado"] = True
-        trigger_sheet_reload()
 
 if not compare_mode:
     df_periodo_leads_meta_whatsapp_empty_check = get_effective_period_filtered_df(dfs.get("leads_meta_whatsapp", pd.DataFrame()), periodo_sel, hoje, ontem)
