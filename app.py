@@ -1766,6 +1766,52 @@ def get_opportunity_lead_keys(df: pd.DataFrame) -> set[str]:
     }
 
 
+def count_opportunities_by_column(df: pd.DataFrame, source_col: str, output_col: str) -> pd.DataFrame:
+    if df is None or df.empty or source_col not in df.columns:
+        return pd.DataFrame(columns=[output_col, "count"])
+
+    out = df.copy()
+    out[output_col] = out[source_col].apply(normalize_text)
+    out = out[out[output_col] != ""].copy()
+    if out.empty:
+        return pd.DataFrame(columns=[output_col, "count"])
+
+    opportunity_col = "oportunidade" if "oportunidade" in out.columns else None
+    if opportunity_col:
+        out["_opp_key"] = out[opportunity_col].apply(normalize_text)
+        empty_mask = out["_opp_key"].eq("")
+        if empty_mask.any():
+            out.loc[empty_mask, "_opp_key"] = [f"sem_codigo_{idx}" for idx in out[empty_mask].index]
+        counted = out.groupby(output_col)["_opp_key"].nunique()
+    else:
+        counted = out.groupby(output_col).size()
+
+    return counted.reset_index(name="count")
+
+
+def count_opportunities_by_campaign(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty or "campanha" not in df.columns:
+        return pd.DataFrame(columns=["Campanha", "count"])
+
+    out = df.copy()
+    out["Campanha"] = out["campanha"].apply(normalize_campaign)
+    out = out[out["Campanha"] != "Campanha não identificada"].copy()
+    if out.empty:
+        return pd.DataFrame(columns=["Campanha", "count"])
+
+    opportunity_col = "oportunidade" if "oportunidade" in out.columns else None
+    if opportunity_col:
+        out["_opp_key"] = out[opportunity_col].apply(normalize_text)
+        empty_mask = out["_opp_key"].eq("")
+        if empty_mask.any():
+            out.loc[empty_mask, "_opp_key"] = [f"sem_codigo_{idx}" for idx in out[empty_mask].index]
+        counted = out.groupby("Campanha")["_opp_key"].nunique()
+    else:
+        counted = out.groupby("Campanha").size()
+
+    return counted.reset_index(name="count")
+
+
 def get_negocios_efetuados_df(df_opp_full: pd.DataFrame, periodo_sel: str, hoje: date, ontem: date) -> pd.DataFrame:
     if df_opp_full.empty or "status_funil" not in df_opp_full.columns:
         return pd.DataFrame(columns=df_opp_full.columns if not df_opp_full.empty else [])
@@ -1818,22 +1864,33 @@ def build_origin_table(
 
     if leads_frames:
         df_leads_combined = prepare_leads_for_reporting(pd.concat(leads_frames, ignore_index=True))
-        unique_leads = df_leads_combined.drop_duplicates(subset=["origem", "lead_key"]).copy()
-        opp_keys = get_opportunity_lead_keys(df_opportunities_periodo)
-        neg_keys = get_opportunity_lead_keys(df_negocios_periodo)
-
-        unique_leads["Oportunidades"] = unique_leads["lead_key"].isin(opp_keys).astype(int)
-        unique_leads["Negocios"] = unique_leads["lead_key"].isin(neg_keys).astype(int)
-
-        df_out = (
-            unique_leads.groupby("origem")
-            .agg(Leads=("lead_key", "nunique"), Oportunidades=("Oportunidades", "sum"), Negocios=("Negocios", "sum"))
-            .reset_index()
-            .rename(columns={"origem": "Origem", "Negocios": "Negócios"})
+        df_leads_counts = (
+            df_leads_combined.drop_duplicates(subset=["origem", "lead_key"])
+            .groupby("origem")["lead_key"]
+            .nunique()
+            .reset_index(name="Leads")
+            .rename(columns={"origem": "Origem"})
         )
-        return df_out.sort_values(["Leads", "Oportunidades", "Negócios"], ascending=False).reset_index(drop=True)
     else:
+        df_leads_counts = pd.DataFrame(columns=["Origem", "Leads"])
+
+    df_opp_counts = (
+        count_opportunities_by_column(df_opportunities_periodo, "origem", "Origem")
+        .rename(columns={"count": "Oportunidades"})
+    )
+    df_neg_counts = (
+        count_opportunities_by_column(df_negocios_periodo, "origem", "Origem")
+        .rename(columns={"count": "Negócios"})
+    )
+
+    df_out = df_leads_counts.merge(df_opp_counts, on="Origem", how="outer")
+    df_out = df_out.merge(df_neg_counts, on="Origem", how="outer")
+    if df_out.empty:
         return pd.DataFrame(columns=["Origem", "Leads", "Oportunidades", "Negócios"])
+
+    for col in ["Leads", "Oportunidades", "Negócios"]:
+        df_out[col] = df_out[col].fillna(0).astype(int)
+    return df_out.sort_values(["Leads", "Oportunidades", "Negócios"], ascending=False).reset_index(drop=True)
 
 
 def prepare_leads_for_campaign_reporting(df: pd.DataFrame) -> pd.DataFrame:
@@ -1884,15 +1941,6 @@ def build_campaign_table(
     """
     lead_frames = [df for df in [df_leads_filtrado] + (extra_leads_dfs or []) if df is not None and not df.empty]
 
-    if not lead_frames:
-        return pd.DataFrame()
-
-    df_c_unique = prepare_leads_for_campaign_reporting(pd.concat(lead_frames, ignore_index=True))
-    df_c_unique = df_c_unique[df_c_unique["Campanha"] != "Campanha não identificada"].copy()
-    if df_c_unique.empty:
-        return pd.DataFrame()
-
-    df_c_unique = df_c_unique.drop_duplicates(subset=["Campanha", "lead_key"]).copy()
     opp_source = df_opportunities_periodo if df_opportunities_periodo is not None else df_opp_full
     neg_source = df_negocios_periodo
     if neg_source is None:
@@ -1902,62 +1950,139 @@ def build_campaign_table(
             else pd.DataFrame()
         )
 
-    opp_keys = get_opportunity_lead_keys(opp_source)
-    neg_keys = get_opportunity_lead_keys(neg_source)
-    df_c_unique["Oportunidades"] = df_c_unique["lead_key"].isin(opp_keys).astype(int)
-    df_c_unique["Negocios"] = df_c_unique["lead_key"].isin(neg_keys).astype(int)
+    if lead_frames:
+        df_c_unique = prepare_leads_for_campaign_reporting(pd.concat(lead_frames, ignore_index=True))
+        df_c_unique = df_c_unique[df_c_unique["Campanha"] != "Campanha não identificada"].copy()
+        df_leads_counts = (
+            df_c_unique.drop_duplicates(subset=["Campanha", "lead_key"])
+            .groupby("Campanha")["lead_key"]
+            .nunique()
+            .reset_index(name="Leads")
+            if not df_c_unique.empty
+            else pd.DataFrame(columns=["Campanha", "Leads"])
+        )
+    else:
+        df_leads_counts = pd.DataFrame(columns=["Campanha", "Leads"])
 
-    df_campaign_out = (
-        df_c_unique.groupby("Campanha")
-        .agg(Leads=("lead_key", "nunique"), Oportunidades=("Oportunidades", "sum"), Negocios=("Negocios", "sum"))
-        .reset_index()
-        .rename(columns={"Negocios": "Negócios"})
+    df_opp_counts = count_opportunities_by_campaign(opp_source).rename(columns={"count": "Oportunidades"})
+    df_neg_counts = count_opportunities_by_campaign(neg_source).rename(columns={"count": "Negócios"})
+
+    df_campaign_out = df_leads_counts.merge(df_opp_counts, on="Campanha", how="outer")
+    df_campaign_out = df_campaign_out.merge(df_neg_counts, on="Campanha", how="outer")
+    if df_campaign_out.empty:
+        return pd.DataFrame(columns=["Campanha", "Leads", "Oportunidades", "Negócios"])
+
+    for col in ["Leads", "Oportunidades", "Negócios"]:
+        df_campaign_out[col] = df_campaign_out[col].fillna(0).astype(int)
+    df_campaign_out = df_campaign_out[
+        (df_campaign_out["Leads"] > 0)
+        | (df_campaign_out["Oportunidades"] > 0)
+        | (df_campaign_out["Negócios"] > 0)
+    ].copy()
+    if df_campaign_out.empty:
+        return pd.DataFrame(columns=["Campanha", "Leads", "Oportunidades", "Negócios"])
+    return (
+        df_campaign_out
+        .sort_values(["Leads", "Oportunidades", "Negócios"], ascending=False)
+        .reset_index(drop=True)
     )
-    return df_campaign_out.sort_values(["Leads", "Oportunidades", "Negócios"], ascending=False).reset_index(drop=True)
 
 
 def build_terms_table(
     df_leads_filtrado: pd.DataFrame,
-    df_opp_full: pd.DataFrame,
+    df_opportunities_periodo: pd.DataFrame,
+    df_leads_lookup: pd.DataFrame | None = None,
+    df_negocios_periodo: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Cria tabela de termos de pesquisa com colunas: Palavra-chave, Leads, Oportunidades, Negócios.
     """
     df_t_unique = prepare_leads_for_reporting(df_leads_filtrado)
     if df_t_unique.empty or "utm_term" not in df_t_unique.columns:
-        return pd.DataFrame()
+        leads_por_term = pd.DataFrame(columns=["Palavra-chave", "Leads"])
+    else:
+        df_t_unique = df_t_unique[df_t_unique["utm_term"] != "Palavra-chave não identificada"].copy()
+        leads_por_term = (
+            df_t_unique.drop_duplicates(subset=["utm_term", "lead_key"])
+            .groupby("utm_term")["lead_key"]
+            .nunique()
+            .reset_index(name="Leads")
+            .rename(columns={"utm_term": "Palavra-chave"})
+            if not df_t_unique.empty
+            else pd.DataFrame(columns=["Palavra-chave", "Leads"])
+        )
 
-    df_t_unique = df_t_unique[df_t_unique["utm_term"] != "Palavra-chave não identificada"].copy()
-    if df_t_unique.empty:
-        return pd.DataFrame()
+    lookup_source = df_leads_lookup if df_leads_lookup is not None else df_leads_filtrado
+    df_lookup = prepare_leads_for_reporting(lookup_source)
+    if df_lookup.empty or "utm_term" not in df_lookup.columns:
+        df_opp_counts = pd.DataFrame(columns=["Palavra-chave", "Oportunidades"])
+        df_neg_counts = pd.DataFrame(columns=["Palavra-chave", "Negócios"])
+    else:
+        df_lookup = df_lookup[df_lookup["utm_term"] != "Palavra-chave não identificada"].copy()
+        df_lookup = df_lookup.drop_duplicates(subset=["lead_key", "utm_term"])
 
-    leads_por_term = (
-        df_t_unique.drop_duplicates(subset=["utm_term", "lead_key"])
-        .groupby("utm_term")["lead_key"]
-        .nunique()
-        .reset_index(name="Leads")
-        .rename(columns={"utm_term": "Palavra-chave"})
-    )
+        def _count_by_term(df_opp: pd.DataFrame, count_col: str) -> pd.DataFrame:
+            if df_opp is None or df_opp.empty or df_lookup.empty or "user_id" not in df_opp.columns:
+                return pd.DataFrame(columns=["Palavra-chave", count_col])
 
-    opp_user_ids = get_opportunity_lead_keys(df_opp_full)
-    neg_df = (
-        df_opp_full[df_opp_full["status_funil"].apply(is_negocio_efetuado)]
-        if (not df_opp_full.empty and "status_funil" in df_opp_full.columns)
-        else pd.DataFrame()
-    )
-    neg_user_ids = get_opportunity_lead_keys(neg_df)
+            opp = df_opp.copy()
+            opp["lead_key"] = opp["user_id"].apply(lambda value: normalize_text(value).lower())
+            opp = opp[opp["lead_key"] != ""].copy()
+            if opp.empty:
+                return pd.DataFrame(columns=["Palavra-chave", count_col])
 
-    opp_counts = []
-    neg_counts = []
-    for _, row in leads_por_term.iterrows():
-        term_leads = df_t_unique[df_t_unique["utm_term"] == row["Palavra-chave"]]
-        lead_keys = set(term_leads["lead_key"].dropna())
-        opp_counts.append(len(lead_keys & opp_user_ids))
-        neg_counts.append(len(lead_keys & neg_user_ids))
+            if "oportunidade" in opp.columns:
+                opp["_opp_key"] = opp["oportunidade"].apply(normalize_text)
+                empty_mask = opp["_opp_key"].eq("")
+                if empty_mask.any():
+                    opp.loc[empty_mask, "_opp_key"] = [f"sem_codigo_{idx}" for idx in opp[empty_mask].index]
+            else:
+                opp["_opp_key"] = [f"linha_{idx}" for idx in opp.index]
 
-    leads_por_term["Oportunidades"] = opp_counts
-    leads_por_term["Negócios"] = neg_counts
-    return leads_por_term.sort_values("Leads", ascending=False).reset_index(drop=True)
+            joined = opp[["lead_key", "_opp_key"]].merge(
+                df_lookup[["lead_key", "utm_term"]],
+                on="lead_key",
+                how="inner",
+            )
+            if joined.empty:
+                return pd.DataFrame(columns=["Palavra-chave", count_col])
+
+            return (
+                joined.drop_duplicates(subset=["utm_term", "_opp_key"])
+                .groupby("utm_term")["_opp_key"]
+                .nunique()
+                .reset_index(name=count_col)
+                .rename(columns={"utm_term": "Palavra-chave"})
+            )
+
+        df_opp_counts = _count_by_term(df_opportunities_periodo, "Oportunidades")
+        if df_negocios_periodo is None:
+            df_negocios_periodo = (
+                df_opportunities_periodo[df_opportunities_periodo["status_funil"].apply(is_negocio_efetuado)]
+                if (
+                    df_opportunities_periodo is not None
+                    and not df_opportunities_periodo.empty
+                    and "status_funil" in df_opportunities_periodo.columns
+                )
+                else pd.DataFrame()
+            )
+        df_neg_counts = _count_by_term(df_negocios_periodo, "Negócios")
+
+    df_out = leads_por_term.merge(df_opp_counts, on="Palavra-chave", how="outer")
+    df_out = df_out.merge(df_neg_counts, on="Palavra-chave", how="outer")
+    if df_out.empty:
+        return pd.DataFrame(columns=["Palavra-chave", "Leads", "Oportunidades", "Negócios"])
+
+    for col in ["Leads", "Oportunidades", "Negócios"]:
+        df_out[col] = df_out[col].fillna(0).astype(int)
+    df_out = df_out[
+        (df_out["Leads"] > 0)
+        | (df_out["Oportunidades"] > 0)
+        | (df_out["Negócios"] > 0)
+    ].copy()
+    if df_out.empty:
+        return pd.DataFrame(columns=["Palavra-chave", "Leads", "Oportunidades", "Negócios"])
+    return df_out.sort_values(["Leads", "Oportunidades", "Negócios"], ascending=False).reset_index(drop=True)
 
 
 def normalize_conversion_page(value) -> str:
@@ -2191,7 +2316,21 @@ def render_normal_mode(
         st.dataframe(df_camp_table, use_container_width=True, height=400)
 
     st.markdown("### Informações por Termos de Pesquisa")
-    df_terms_table = build_terms_table(df_leads_all_filtrado, df_periodo_opportunities)
+    df_leads_site_lookup = apply_extra_filters_leads(dfs.get("leads_site", pd.DataFrame()), eventos_sel, origens_sel, dispositivos_sel)
+    df_leads_meta_whatsapp_lookup = apply_common_filters(dfs.get("leads_meta_whatsapp", pd.DataFrame()), origens_sel, dispositivos_sel)
+    df_leads_meta_formulario_lookup = apply_common_filters(dfs.get("leads_meta_formulario", pd.DataFrame()), origens_sel, dispositivos_sel)
+    df_leads_all_lookup = build_combined_leads(
+        company_slug,
+        df_leads_site_lookup,
+        df_leads_meta_whatsapp_lookup,
+        df_leads_meta_formulario_lookup,
+    )
+    df_terms_table = build_terms_table(
+        df_leads_all_filtrado,
+        df_periodo_opportunities,
+        df_leads_lookup=df_leads_all_lookup,
+        df_negocios_periodo=df_negocios_periodo,
+    )
     if df_terms_table.empty:
         st.info("Nenhuma palavra-chave válida encontrada no período filtrado.")
     else:
