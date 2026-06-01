@@ -49,7 +49,6 @@ SMARK_SHEET_TAB_NAME = "smark_data"
 
 SHEETS_REQUIRED = [
     "leads_site",
-    "sessions",
 ]
 
 OPTIONAL_SHEETS = [
@@ -2053,7 +2052,6 @@ def render_normal_mode(
     company_slug: str,
     dfs: dict,
     df_periodo_leads,
-    df_periodo_sessions,
     df_periodo_opportunities,
     df_opp_full,
     eventos_sel,
@@ -2568,7 +2566,6 @@ ontem = hoje - timedelta(days=1)
 compare_mode = False
 
 df_periodo_leads = get_period_filtered_df(df_leads, periodo_sel, hoje, ontem)
-df_periodo_sessions = get_period_filtered_df(dfs["sessions"], periodo_sel, hoje, ontem)
 df_periodo_opportunities = get_period_filtered_df(df_opportunities, periodo_sel, hoje, ontem)
 
 if periodo_sel == "Personalizado":
@@ -2592,19 +2589,16 @@ if periodo_sel == "Personalizado":
     if st.session_state.get("custom_aplicado", False):
         if custom_mes_label == "Todo o ano":
             df_periodo_leads = df_leads[df_leads["ano"] == custom_ano].copy()
-            df_periodo_sessions = dfs["sessions"][dfs["sessions"]["ano"] == custom_ano].copy()
             df_periodo_opportunities = df_opportunities[df_opportunities["ano"] == custom_ano].copy() if not df_opportunities.empty else df_opportunities
         else:
             mes_num_sel = month_label_to_num(custom_mes_label)
             df_periodo_leads = df_leads[(df_leads["ano"] == custom_ano) & (df_leads["mes"] == mes_num_sel)].copy()
-            df_periodo_sessions = dfs["sessions"][(dfs["sessions"]["ano"] == custom_ano) & (dfs["sessions"]["mes"] == mes_num_sel)].copy()
             if not df_opportunities.empty:
                 df_periodo_opportunities = df_opportunities[(df_opportunities["ano"] == custom_ano) & (df_opportunities["mes"] == mes_num_sel)].copy()
             else:
                 df_periodo_opportunities = df_opportunities
     else:
         df_periodo_leads = get_period_filtered_df(df_leads, "Últimos 30 dias", hoje, ontem)
-        df_periodo_sessions = get_period_filtered_df(dfs["sessions"], "Últimos 30 dias", hoje, ontem)
         df_periodo_opportunities = get_period_filtered_df(df_opportunities, "Últimos 30 dias", hoje, ontem)
 
 elif periodo_sel == "Comparar meses":
@@ -2705,7 +2699,6 @@ else:
         company_slug,
         dfs,
         df_periodo_leads,
-        df_periodo_sessions,
         df_periodo_opportunities,
         df_opportunities,  # df_opp_full para negócios efetuados
         eventos_sel,
