@@ -1994,7 +1994,11 @@ def image_as_data_uri(image_path: str) -> str:
     path = Path(image_path)
     if not path.exists():
         return ""
-    mime_type = "image/png" if path.suffix.lower() == ".png" else "application/octet-stream"
+    mime_types = {
+        ".png": "image/png",
+        ".svg": "image/svg+xml",
+    }
+    mime_type = mime_types.get(path.suffix.lower(), "application/octet-stream")
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{mime_type};base64,{encoded}"
 
@@ -2002,16 +2006,17 @@ def image_as_data_uri(image_path: str) -> str:
 def campaign_badge_html(campaign_name: str) -> str:
     campaign_key = campaign_name.casefold()
     badge_rules = [
-        ("[nextqsbr]-metaads", "&#127463;&#127479;", "meta"),
-        ("[nextqspt]-metaads", "&#127477;&#127481;", "meta"),
-        ("[nextqsbr]-googleads", "&#127463;&#127479;", "google"),
-        ("[nextqspt]-googleads", "&#127477;&#127481;", "google"),
+        ("[nextqsbr]-metaads", "br", "meta"),
+        ("[nextqspt]-metaads", "pt", "meta"),
+        ("[nextqsbr]-googleads", "br", "google"),
+        ("[nextqspt]-googleads", "pt", "google"),
     ]
-    for marker, flag_html, platform_class in badge_rules:
+    for marker, country_code, platform_class in badge_rules:
         if marker in campaign_key:
             return (
                 "<span class='campaign-badge'>"
-                f"<span class='campaign-flag'>{flag_html}</span>"
+                f"<span class='campaign-flag campaign-flag-{country_code}' "
+                f"role='img' aria-label='{country_code.upper()}'></span>"
                 f"<span class='campaign-platform campaign-platform-{platform_class}'></span>"
                 "</span>"
             )
@@ -2022,6 +2027,8 @@ def render_campaign_table(df_campaigns: pd.DataFrame, height: int = 400):
     assets_dir = Path(__file__).resolve().parent / "assets"
     meta_icon = image_as_data_uri(str(assets_dir / "meta-ads.png"))
     google_icon = image_as_data_uri(str(assets_dir / "google-ads.png"))
+    br_flag = image_as_data_uri(str(assets_dir / "flag-br.svg"))
+    pt_flag = image_as_data_uri(str(assets_dir / "flag-pt.svg"))
 
     header_html = "".join(
         f"<th class='{'campaign-name-col' if col == 'Campanha' else 'campaign-number-col'}'>{html.escape(str(col))}</th>"
@@ -2087,7 +2094,17 @@ def render_campaign_table(df_campaigns: pd.DataFrame, height: int = 400):
             vertical-align: middle;
             white-space: nowrap;
         }}
-        .campaign-flag {{ font-size: 1em; line-height: 1; }}
+        .campaign-flag {{
+            display: inline-block;
+            width: 1.1em;
+            height: 1.1em;
+            background-position: center;
+            background-repeat: no-repeat;
+            background-size: contain;
+            flex: 0 0 1.1em;
+        }}
+        .campaign-flag-br {{ background-image: url('{br_flag}'); }}
+        .campaign-flag-pt {{ background-image: url('{pt_flag}'); }}
         .campaign-platform {{
             display: inline-block;
             width: 1.05em;
