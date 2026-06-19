@@ -1,3 +1,4 @@
+import base64
 import io
 import html
 import re
@@ -1988,6 +1989,128 @@ def build_campaign_table(
     )
 
 
+@st.cache_data
+def image_as_data_uri(image_path: str) -> str:
+    path = Path(image_path)
+    if not path.exists():
+        return ""
+    mime_type = "image/png" if path.suffix.lower() == ".png" else "application/octet-stream"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def campaign_badge_html(campaign_name: str) -> str:
+    campaign_key = campaign_name.casefold()
+    badge_rules = [
+        ("[nextqsbr]-metaads", "&#127463;&#127479;", "meta"),
+        ("[nextqspt]-metaads", "&#127477;&#127481;", "meta"),
+        ("[nextqsbr]-googleads", "&#127463;&#127479;", "google"),
+        ("[nextqspt]-googleads", "&#127477;&#127481;", "google"),
+    ]
+    for marker, flag_html, platform_class in badge_rules:
+        if marker in campaign_key:
+            return (
+                "<span class='campaign-badge'>"
+                f"<span class='campaign-flag'>{flag_html}</span>"
+                f"<span class='campaign-platform campaign-platform-{platform_class}'></span>"
+                "</span>"
+            )
+    return ""
+
+
+def render_campaign_table(df_campaigns: pd.DataFrame, height: int = 400):
+    assets_dir = Path(__file__).resolve().parent / "assets"
+    meta_icon = image_as_data_uri(str(assets_dir / "meta-ads.png"))
+    google_icon = image_as_data_uri(str(assets_dir / "google-ads.png"))
+
+    header_html = "".join(
+        f"<th class='{'campaign-name-col' if col == 'Campanha' else 'campaign-number-col'}'>{html.escape(str(col))}</th>"
+        for col in df_campaigns.columns
+    )
+
+    rows_html = []
+    for _, row in df_campaigns.iterrows():
+        cells = []
+        for col in df_campaigns.columns:
+            value = row[col]
+            if col == "Campanha":
+                campaign_name = normalize_text(value)
+                badge = campaign_badge_html(campaign_name)
+                cells.append(
+                    "<td class='campaign-name-col'>"
+                    f"{badge}<span class='campaign-name'>{html.escape(campaign_name)}</span>"
+                    "</td>"
+                )
+            else:
+                display_value = "" if pd.isna(value) else str(int(value)) if isinstance(value, (int, float)) else str(value)
+                cells.append(f"<td class='campaign-number-col'>{html.escape(display_value)}</td>")
+        rows_html.append(f"<tr>{''.join(cells)}</tr>")
+
+    table_html = f"""
+    <style>
+        .campaign-table-wrap {{
+            max-height: {int(height)}px;
+            overflow: auto;
+            border: 1px solid rgba(128, 128, 128, 0.28);
+            border-radius: 6px;
+        }}
+        .campaign-table {{
+            width: 100%;
+            border-collapse: collapse;
+            color: inherit;
+            font-size: 0.875rem;
+        }}
+        .campaign-table th {{
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            padding: 0.65rem 0.75rem;
+            background: var(--background-color, #0e1117);
+            border-bottom: 1px solid rgba(128, 128, 128, 0.35);
+            font-weight: 500;
+            text-align: left;
+            white-space: nowrap;
+        }}
+        .campaign-table td {{
+            padding: 0.58rem 0.75rem;
+            border-bottom: 1px solid rgba(128, 128, 128, 0.22);
+            vertical-align: middle;
+        }}
+        .campaign-table tr:last-child td {{ border-bottom: 0; }}
+        .campaign-name-col {{ min-width: 320px; }}
+        .campaign-number-col {{ width: 1%; min-width: 110px; text-align: right; }}
+        .campaign-badge {{
+            display: inline-flex;
+            align-items: center;
+            gap: 0.2em;
+            margin-right: 0.4em;
+            vertical-align: middle;
+            white-space: nowrap;
+        }}
+        .campaign-flag {{ font-size: 1em; line-height: 1; }}
+        .campaign-platform {{
+            display: inline-block;
+            width: 1.05em;
+            height: 1.05em;
+            background-position: center;
+            background-repeat: no-repeat;
+            background-size: contain;
+            flex: 0 0 1.05em;
+        }}
+        .campaign-platform-meta {{ background-image: url('{meta_icon}'); }}
+        .campaign-platform-google {{ background-image: url('{google_icon}'); }}
+        .campaign-name {{ vertical-align: middle; }}
+    </style>
+    <div class="campaign-table-wrap">
+        <table class="campaign-table">
+            <thead><tr>{header_html}</tr></thead>
+            <tbody>{''.join(rows_html)}</tbody>
+        </table>
+    </div>
+    """
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
 def build_terms_table(
     df_leads_filtrado: pd.DataFrame,
     df_opportunities_periodo: pd.DataFrame,
@@ -2313,7 +2436,7 @@ def render_normal_mode(
     if df_camp_table.empty:
         st.info("Nenhuma campanha válida encontrada no período filtrado.")
     else:
-        st.dataframe(df_camp_table, use_container_width=True, height=400)
+        render_campaign_table(df_camp_table, height=400)
 
     st.markdown("### Informações por Termos de Pesquisa")
     df_leads_site_lookup = apply_extra_filters_leads(dfs.get("leads_site", pd.DataFrame()), eventos_sel, origens_sel, dispositivos_sel)
