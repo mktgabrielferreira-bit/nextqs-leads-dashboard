@@ -1894,6 +1894,72 @@ def build_origin_table(
     return df_out.sort_values(["Leads", "Oportunidades", "Negócios"], ascending=False).reset_index(drop=True)
 
 
+def get_nextqs_email_campaign(row) -> str | None:
+    medium = normalize_text(row.get("utm_medium")).casefold()
+    country = normalize_text(row.get("country")).upper()
+    if medium != "email":
+        return None
+    if country == "BR":
+        return "[NextQSBR]-Email"
+    if country == "PT":
+        return "[NextQSPT]-Email"
+    return None
+
+
+def standardize_nextqs_email_campaigns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty or "utm_medium" not in df.columns or "country" not in df.columns:
+        return df.copy() if df is not None else pd.DataFrame()
+
+    out = df.copy()
+    if "utm_campaign" not in out.columns:
+        out["utm_campaign"] = None
+
+    standardized_campaigns = out.apply(get_nextqs_email_campaign, axis=1)
+    mask = standardized_campaigns.notna()
+    out.loc[mask, "utm_campaign"] = standardized_campaigns[mask]
+    return out
+
+
+def build_nextqs_email_campaign_map(df_leads_site: pd.DataFrame) -> dict[str, str]:
+    if df_leads_site is None or df_leads_site.empty:
+        return {}
+
+    out = standardize_nextqs_email_campaigns(df_leads_site)
+    out["_email_campaign"] = out.apply(get_nextqs_email_campaign, axis=1)
+    out["_lead_key"] = out.apply(build_unique_lead_key_from_row, axis=1)
+    out = out[(out["_email_campaign"].notna()) & (out["_lead_key"] != "")].copy()
+    if out.empty:
+        return {}
+
+    if "data_hora" in out.columns:
+        out = out.sort_values("data_hora")
+    out = out.drop_duplicates(subset=["_lead_key"], keep="last")
+    return dict(zip(out["_lead_key"], out["_email_campaign"]))
+
+
+def apply_email_campaign_map_to_opportunities(
+    df_opportunities: pd.DataFrame,
+    email_campaign_map: dict[str, str],
+) -> pd.DataFrame:
+    if (
+        df_opportunities is None
+        or df_opportunities.empty
+        or not email_campaign_map
+        or "user_id" not in df_opportunities.columns
+    ):
+        return df_opportunities.copy() if df_opportunities is not None else pd.DataFrame()
+
+    out = df_opportunities.copy()
+    if "campanha" not in out.columns:
+        out["campanha"] = None
+
+    lead_keys = out["user_id"].apply(lambda value: normalize_text(value).lower())
+    standardized_campaigns = lead_keys.map(email_campaign_map)
+    mask = standardized_campaigns.notna()
+    out.loc[mask, "campanha"] = standardized_campaigns[mask]
+    return out
+
+
 def prepare_leads_for_campaign_reporting(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["Campanha", "lead_key"])
@@ -1936,12 +2002,12 @@ def build_campaign_table(
     extra_leads_dfs: list[pd.DataFrame] | None = None,
     df_opportunities_periodo: pd.DataFrame | None = None,
     df_negocios_periodo: pd.DataFrame | None = None,
+    company_slug: str = "nextqs",
+    df_leads_site_lookup: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Cria tabela de campanhas com colunas: Campanha, Leads, Oportunidades, Negócios.
     """
-    lead_frames = [df for df in [df_leads_filtrado] + (extra_leads_dfs or []) if df is not None and not df.empty]
-
     opp_source = df_opportunities_periodo if df_opportunities_periodo is not None else df_opp_full
     neg_source = df_negocios_periodo
     if neg_source is None:
@@ -1950,6 +2016,21 @@ def build_campaign_table(
             if (not df_opp_full.empty and "status_funil" in df_opp_full.columns)
             else pd.DataFrame()
         )
+
+    site_leads_for_campaign = df_leads_filtrado
+    if company_slug == "nextqs":
+        site_leads_for_campaign = standardize_nextqs_email_campaigns(df_leads_filtrado)
+        email_campaign_map = build_nextqs_email_campaign_map(
+            df_leads_site_lookup if df_leads_site_lookup is not None else df_leads_filtrado
+        )
+        opp_source = apply_email_campaign_map_to_opportunities(opp_source, email_campaign_map)
+        neg_source = apply_email_campaign_map_to_opportunities(neg_source, email_campaign_map)
+
+    lead_frames = [
+        df
+        for df in [site_leads_for_campaign] + (extra_leads_dfs or [])
+        if df is not None and not df.empty
+    ]
 
     if lead_frames:
         df_c_unique = prepare_leads_for_campaign_reporting(pd.concat(lead_frames, ignore_index=True))
@@ -2010,6 +2091,8 @@ def campaign_badge_html(campaign_name: str) -> str:
         ("[nextqspt]-metaads", "pt", "meta"),
         ("[nextqsbr]-googleads", "br", "google"),
         ("[nextqspt]-googleads", "pt", "google"),
+        ("[nextqsbr]-email", "br", "email"),
+        ("[nextqspt]-email", "pt", "email"),
     ]
     for marker, country_code, platform_class in badge_rules:
         if marker in campaign_key:
@@ -2027,6 +2110,7 @@ def render_campaign_table(df_campaigns: pd.DataFrame, height: int = 400):
     assets_dir = Path(__file__).resolve().parent / "assets"
     meta_icon = image_as_data_uri(str(assets_dir / "meta-ads.png"))
     google_icon = image_as_data_uri(str(assets_dir / "google-ads.png"))
+    email_icon = image_as_data_uri(str(assets_dir / "email.png"))
     br_flag = image_as_data_uri(str(assets_dir / "flag-br.svg"))
     pt_flag = image_as_data_uri(str(assets_dir / "flag-pt.svg"))
 
@@ -2116,6 +2200,7 @@ def render_campaign_table(df_campaigns: pd.DataFrame, height: int = 400):
         }}
         .campaign-platform-meta {{ background-image: url('{meta_icon}'); }}
         .campaign-platform-google {{ background-image: url('{google_icon}'); }}
+        .campaign-platform-email {{ background-image: url('{email_icon}'); }}
         .campaign-name {{ vertical-align: middle; }}
     </style>
     <div class="campaign-table-wrap">
@@ -2449,6 +2534,8 @@ def render_normal_mode(
         extra_leads_dfs=extra_campaign_leads,
         df_opportunities_periodo=df_periodo_opportunities,
         df_negocios_periodo=df_negocios_periodo,
+        company_slug=company_slug,
+        df_leads_site_lookup=dfs.get("leads_site", pd.DataFrame()),
     )
     if df_camp_table.empty:
         st.info("Nenhuma campanha válida encontrada no período filtrado.")
