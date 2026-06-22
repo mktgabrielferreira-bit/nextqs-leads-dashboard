@@ -58,16 +58,6 @@ OPTIONAL_SHEETS = [
     "leads_meta_formulario",
 ]
 
-TIMELINE_LAZY_SHEETS = [
-    "pageview",
-    "click_whatsapp",
-    "click_formulario",
-    "downloads",
-    "form_start_whatsapp",
-    "form_start_formulario",
-    "newsletter",
-]
-
 MESES_LABEL = {
     1: "Janeiro",
     2: "Fevereiro",
@@ -2456,454 +2446,151 @@ def identity_match_mask(df: pd.DataFrame, columns: list[str], values: set[str]) 
     return mask
 
 
-def timeline_source_configs() -> dict[str, dict]:
-    return {
-        "pageview": {
-            "label": "Navegação",
-            "user_cols": [],
-            "email_cols": [],
-            "browser_cols": ["nextqs_anon_id", "_ga"],
-        },
-        "click_whatsapp": {
-            "label": "Interação",
-            "user_cols": [],
-            "email_cols": [],
-            "browser_cols": ["user_id", "_ga"],
-        },
-        "click_formulario": {
-            "label": "Interação",
-            "user_cols": [],
-            "email_cols": [],
-            "browser_cols": ["user_id", "_ga"],
-        },
-        "form_start_whatsapp": {
-            "label": "Interação",
-            "user_cols": [],
-            "email_cols": [],
-            "browser_cols": ["nextqs_anon_id"],
-        },
-        "form_start_formulario": {
-            "label": "Interação",
-            "user_cols": [],
-            "email_cols": [],
-            "browser_cols": ["nextqs_anon_id"],
-        },
-        "leads_site": {
-            "label": "Conversão",
-            "user_cols": ["user_id_email"],
-            "email_cols": ["email"],
-            "browser_cols": ["nextqs_anon_id", "_ga"],
-        },
-        "leads_meta_formulario": {
-            "label": "Conversão",
-            "user_cols": ["user_id_email"],
-            "email_cols": ["email"],
-            "browser_cols": [],
-        },
-        "leads_meta_whatsapp": {
-            "label": "Conversão",
-            "user_cols": ["user_id_cel"],
-            "email_cols": [],
-            "browser_cols": [],
-        },
-        "downloads": {
-            "label": "Conversão",
-            "user_cols": ["user_id_email"],
-            "email_cols": ["email"],
-            "browser_cols": ["user_id_stape"],
-        },
-        "newsletter": {
-            "label": "Conversão",
-            "user_cols": ["user_id_email"],
-            "email_cols": ["email"],
-            "browser_cols": ["user_id", "_ga"],
-        },
-        "oportunidades": {
-            "label": "Comercial",
-            "user_cols": ["user_id"],
-            "email_cols": [],
-            "browser_cols": [],
-        },
-    }
+def format_opportunity_summary_date(value) -> str:
+    parsed = pd.to_datetime(value, dayfirst=True, errors="coerce")
+    return parsed.strftime("%d/%m/%Y") if not pd.isna(parsed) else "-"
 
 
-def get_timeline_event_content(source: str, row: pd.Series) -> tuple[str, list[tuple[str, str]]]:
-    details = []
-
-    def add_detail(label: str, value, transform=None):
-        text = transform(value) if transform else normalize_text(value)
-        if text and normalize_identity_value(text):
-            details.append((label, text))
-
-    if source == "pageview":
-        page = normalize_conversion_page(row.get("url"))
-        title = f"Acesso ao site · {page or 'Página não identificada'}"
-    elif source == "click_whatsapp":
-        title = "Clique no botão do WhatsApp"
-    elif source == "click_formulario":
-        button = normalize_text(row.get("text_button"))
-        title = f"Clique para formulário · {button}" if button else "Clique para formulário"
-    elif source == "form_start_whatsapp":
-        title = "Início do formulário do WhatsApp"
-    elif source == "form_start_formulario":
-        title = "Início do formulário"
-    elif source == "leads_site":
-        event_name = label_evento(row.get("evento"))
-        title = f"Conversão no site · {event_name}"
-        add_detail("Nome", row.get("nome"))
-        add_detail("Email", row.get("email"))
-        add_detail("Empresa", row.get("empresa"))
-        add_detail("País", row.get("country"))
-        add_detail("Página de conversão", row.get("page_conversao"), normalize_conversion_page)
-    elif source == "leads_meta_formulario":
-        title = "Lead Meta · Formulário instantâneo"
-        add_detail("Nome", row.get("nome"))
-        add_detail("Email", row.get("email"))
-        add_detail("Empresa", row.get("empresa"))
-    elif source == "leads_meta_whatsapp":
-        title = "Lead Meta · Campanha de mensagens"
-        add_detail("Nome", row.get("nome"))
-        add_detail("Telefone", row.get("telefone"))
-        add_detail("Empresa", row.get("empresa"))
-    elif source == "downloads":
-        material = normalize_text(row.get("material"))
-        title = f"Download · {material}" if material else "Download de material"
-        add_detail("Email", row.get("email"))
-    elif source == "newsletter":
-        title = "Assinatura da newsletter"
-        add_detail("Email", row.get("email"))
-    elif source == "oportunidades":
-        opportunity = normalize_opportunity_key(row.get("oportunidade"))
-        title = f"Virou oportunidade #{opportunity}" if opportunity else "Virou oportunidade"
-        add_detail("Status atual", row.get("status_funil"))
-        add_detail("Consultor", row.get("consultor"))
-        add_detail("Área de atuação", row.get("area_atuação"))
-        add_detail("Canal", row.get("canal"))
-        add_detail("Data de encerramento", row.get("data_encerramento"))
-    else:
-        title = source.replace("_", " ").title()
-
-    add_detail("Origem", row.get("origem"))
-    campaign = row.get("utm_campaign") if normalize_text(row.get("utm_campaign")) else row.get("campanha")
-    add_detail("Campanha", campaign)
-    add_detail("Dispositivo", row.get("dispositivo"))
-    add_detail("IP", row.get("ip_address"))
-
-    if source in {"pageview", "click_whatsapp", "click_formulario", "form_start_whatsapp", "form_start_formulario"}:
-        add_detail("Página", row.get("url"), normalize_conversion_page)
-
-    return title, details
-
-
-def infer_country_from_journey(countries: set[str], campaigns: set[str]) -> str:
-    normalized_countries = {normalize_text(value).upper() for value in countries if normalize_text(value)}
-    if normalized_countries:
-        return ", ".join(sorted(normalized_countries))
-    campaign_text = " ".join(campaigns).casefold()
-    inferred = []
-    if "[nextqsbr]" in campaign_text:
-        inferred.append("BR")
-    if "[nextqspt]" in campaign_text:
-        inferred.append("PT")
-    return ", ".join(inferred) if inferred else "-"
-
-
-def parse_first_origin(value) -> tuple[pd.Timestamp | None, str]:
-    text = normalize_text(value)
-    match = re.match(r"^(\d{2}/\d{2}/\d{4}\s*-\s*\d{2}:\d{2}:\d{2})\s*-\s*(.+)$", text)
-    if not match:
-        return None, ""
-    event_date = pd.to_datetime(match.group(1), dayfirst=True, errors="coerce")
-    if pd.isna(event_date):
-        return None, ""
-    return event_date, match.group(2).strip()
-
-
-def build_opportunity_journey(company_slug: str, opportunity_query: str, dfs: dict) -> dict:
+def build_opportunity_summary(company_slug: str, opportunity_query: str, dfs: dict) -> dict:
     opportunity_key = normalize_opportunity_key(opportunity_query)
     df_opportunities = dfs.get("oportunidades", pd.DataFrame())
     if not opportunity_key or df_opportunities.empty or "oportunidade" not in df_opportunities.columns:
-        return {"found": False, "message": "Oportunidade não encontrada."}
+        return {"found": False}
 
     opportunity_mask = df_opportunities["oportunidade"].apply(normalize_opportunity_key).eq(opportunity_key)
-    searched_opportunities = df_opportunities[opportunity_mask].copy()
-    if searched_opportunities.empty:
-        return {"found": False, "message": f"Oportunidade #{html.escape(opportunity_key)} não encontrada."}
+    matched_opportunities = df_opportunities[opportunity_mask].copy()
+    if matched_opportunities.empty:
+        return {"found": False}
 
-    timeline_dfs = {
-        "leads_site": dfs.get("leads_site", pd.DataFrame()),
-        "leads_meta_formulario": dfs.get("leads_meta_formulario", pd.DataFrame()),
-        "leads_meta_whatsapp": dfs.get("leads_meta_whatsapp", pd.DataFrame()),
-        "oportunidades": df_opportunities,
-    }
-    for sheet_name in TIMELINE_LAZY_SHEETS:
-        timeline_dfs[sheet_name] = load_sheet(company_slug, sheet_name)
+    opportunity = matched_opportunities.sort_values("data_hora").iloc[-1]
+    user_ids = identity_values_from_rows(matched_opportunities, ["user_id"])
 
-    configs = timeline_source_configs()
-    context = {
-        "user_ids": identity_values_from_rows(searched_opportunities, ["user_id"]),
-        "emails": set(),
-        "browser_ids": set(),
-        "ips": set(),
-        "countries": set(),
-        "campaigns": set(),
-    }
+    df_site = dfs.get("leads_site", pd.DataFrame())
+    df_meta_form = dfs.get("leads_meta_formulario", pd.DataFrame())
+    df_meta_whatsapp = dfs.get("leads_meta_whatsapp", pd.DataFrame())
 
-    # Expande apenas por identificadores fortes. IP é coletado, mas nunca promove
-    # outra pessoa a correspondência confirmada.
-    for _ in range(4):
-        size_before = sum(len(values) for values in context.values())
-        for source, df_source in timeline_dfs.items():
-            if df_source is None or df_source.empty:
-                continue
-            config = configs[source]
-            direct_mask = identity_match_mask(df_source, config["user_cols"], context["user_ids"])
-            direct_mask = direct_mask | identity_match_mask(df_source, config["email_cols"], context["emails"])
-            browser_mask = identity_match_mask(df_source, config["browser_cols"], context["browser_ids"])
-            matched = df_source[direct_mask | browser_mask]
-            if matched.empty:
-                continue
+    site_mask = identity_match_mask(df_site, ["user_id_email"], user_ids)
+    meta_form_mask = identity_match_mask(df_meta_form, ["user_id_email"], user_ids)
+    meta_whatsapp_mask = identity_match_mask(df_meta_whatsapp, ["user_id_cel"], user_ids)
 
-            context["user_ids"].update(identity_values_from_rows(matched, config["user_cols"]))
-            context["emails"].update(identity_values_from_rows(matched, config["email_cols"]))
-            context["browser_ids"].update(identity_values_from_rows(matched, config["browser_cols"]))
-            context["ips"].update(identity_values_from_rows(matched, ["ip_address"]))
-            context["countries"].update(identity_values_from_rows(matched, ["country"]))
-            context["campaigns"].update(identity_values_from_rows(matched, ["utm_campaign", "campanha"]))
+    matched_site = df_site[site_mask].copy()
+    matched_meta_form = df_meta_form[meta_form_mask].copy()
+    matched_meta_whatsapp = df_meta_whatsapp[meta_whatsapp_mask].copy()
 
-        size_after = sum(len(values) for values in context.values())
-        if size_after == size_before:
-            break
+    browser_ids = identity_values_from_rows(matched_site, ["nextqs_anon_id", "_ga"])
+    first_origin = ""
+    df_pageview = load_sheet(company_slug, "pageview")
+    if not df_pageview.empty:
+        pageview_mask = identity_match_mask(df_pageview, ["nextqs_anon_id", "_ga"], browser_ids)
+        matched_pageviews = df_pageview[pageview_mask].sort_values("data_hora")
+        if not matched_pageviews.empty and "primeira_origem" in matched_pageviews.columns:
+            first_origin = normalize_text(matched_pageviews.iloc[0].get("primeira_origem"))
 
-    events = []
-    related_contacts = set()
-    weak_sources = {"leads_site", "downloads", "newsletter"}
-    has_browser_identity = bool(context["browser_ids"])
+    if not first_origin and not matched_site.empty and "primeira_origem" in matched_site.columns:
+        first_origin = normalize_text(matched_site.sort_values("data_hora").iloc[0].get("primeira_origem"))
 
-    for source, df_source in timeline_dfs.items():
-        if df_source is None or df_source.empty:
+    df_downloads = load_sheet(company_slug, "downloads")
+    download_mask = identity_match_mask(df_downloads, ["user_id_email"], user_ids)
+    download_mask = download_mask | identity_match_mask(df_downloads, ["user_id_stape"], browser_ids)
+
+    df_newsletter = load_sheet(company_slug, "newsletter")
+    newsletter_mask = identity_match_mask(df_newsletter, ["user_id_email"], user_ids)
+    newsletter_mask = newsletter_mask | identity_match_mask(df_newsletter, ["user_id", "_ga"], browser_ids)
+
+    conversions = []
+    conversion_sources = [
+        (matched_site, "Site"),
+        (matched_meta_form, "Formulário da Meta"),
+        (matched_meta_whatsapp, "WhatsApp"),
+    ]
+    for conversion_df, source_label in conversion_sources:
+        if conversion_df.empty:
             continue
-        config = configs[source]
-        direct_mask = identity_match_mask(df_source, config["user_cols"], context["user_ids"])
-        direct_mask = direct_mask | identity_match_mask(df_source, config["email_cols"], context["emails"])
-        browser_mask = identity_match_mask(df_source, config["browser_cols"], context["browser_ids"])
-        strong_mask = direct_mask | browser_mask
-        ip_mask = identity_match_mask(df_source, ["ip_address"], context["ips"]) & ~strong_mask
+        for event_date in conversion_df["data_hora"].dropna().sort_values():
+            conversions.append((event_date, f"{event_date.strftime('%d/%m/%Y')} no {source_label}"))
 
-        include_weak = source in weak_sources or not has_browser_identity
-        included = df_source[strong_mask | (ip_mask if include_weak else False)]
-        for index, row in included.iterrows():
-            is_direct = bool(direct_mask.loc[index])
-            is_browser = bool(browser_mask.loc[index])
-            confidence = "confirmed" if is_direct else "browser" if is_browser else "possible"
-            reason = (
-                "Mesmo identificador do lead"
-                if is_direct
-                else "Mesmo navegador"
-                if is_browser
-                else "Possível vínculo pelo mesmo IP"
-            )
+    conversion_labels = []
+    seen_conversions = set()
+    for _, label in sorted(conversions, key=lambda item: item[0]):
+        if label not in seen_conversions:
+            seen_conversions.add(label)
+            conversion_labels.append(label)
 
-            if confidence == "possible":
-                related_contacts.update(identity_values_from_rows(pd.DataFrame([row]), config["email_cols"]))
-
-            event_date = pd.to_datetime(row.get("data_hora"), errors="coerce")
-            if pd.isna(event_date):
-                continue
-            title, details = get_timeline_event_content(source, row)
-            events.append(
-                {
-                    "datetime": event_date,
-                    "source": source,
-                    "source_label": config["label"],
-                    "confidence": confidence,
-                    "reason": reason,
-                    "title": title,
-                    "details": details,
-                }
-            )
-
-    df_site = timeline_dfs.get("leads_site", pd.DataFrame())
-    if not df_site.empty and "primeira_origem" in df_site.columns:
-        site_config = configs["leads_site"]
-        site_direct_mask = identity_match_mask(df_site, site_config["user_cols"], context["user_ids"])
-        site_direct_mask = site_direct_mask | identity_match_mask(df_site, site_config["email_cols"], context["emails"])
-        site_browser_mask = identity_match_mask(df_site, site_config["browser_cols"], context["browser_ids"])
-        known_navigation_dates = [
-            event["datetime"]
-            for event in events
-            if event["source"] == "pageview"
-        ]
-
-        for index, row in df_site[site_direct_mask | site_browser_mask].iterrows():
-            first_date, first_origin = parse_first_origin(row.get("primeira_origem"))
-            if first_date is None:
-                continue
-            if any(abs((known_date - first_date).total_seconds()) <= 120 for known_date in known_navigation_dates):
-                continue
-
-            details = []
-            for label, value in [
-                ("Origem", first_origin),
-                ("Dispositivo", row.get("dispositivo")),
-                ("IP", row.get("ip_address")),
-            ]:
-                text = normalize_text(value)
-                if text and normalize_identity_value(text):
-                    details.append((label, text))
-
-            events.append(
-                {
-                    "datetime": first_date,
-                    "source": "first_touch",
-                    "source_label": "Navegação",
-                    "confidence": "confirmed",
-                    "reason": "Primeira origem registrada no lead",
-                    "title": f"Primeiro acesso registrado · {first_origin}",
-                    "details": details,
-                }
-            )
-
-    events.sort(key=lambda event: event["datetime"])
-    primary_opportunity = searched_opportunities.sort_values("data_hora").iloc[-1]
-    first_access = next(
-        (
-            event["datetime"]
-            for event in events
-            if event["source"] in {"pageview", "first_touch"}
-        ),
-        None,
-    )
-
-    country = infer_country_from_journey(context["countries"], context["campaigns"])
     return {
         "found": True,
         "opportunity_key": opportunity_key,
-        "opportunity": primary_opportunity,
-        "events": events,
-        "country": country,
-        "first_access": first_access,
-        "emails": sorted(context["emails"]),
-        "related_contacts": sorted(related_contacts - context["emails"]),
+        "first_origin": first_origin or "-",
+        "downloaded": "Sim" if bool(download_mask.any()) else "Não",
+        "newsletter": "Sim" if bool(newsletter_mask.any()) else "Não",
+        "converted": conversion_labels or ["-"],
+        "opportunity_date": format_opportunity_summary_date(opportunity.get("data_oportunidade")),
+        "consultant": normalize_text(opportunity.get("consultor")) or "-",
+        "status": normalize_text(opportunity.get("status_funil")) or "-",
     }
 
 
-def render_opportunity_journey(journey: dict):
-    if not journey.get("found"):
-        st.warning(journey.get("message", "Oportunidade não encontrada."))
+def render_opportunity_summary_sidebar(summary: dict):
+    if not summary.get("found"):
+        st.sidebar.warning("Oportunidade não encontrada.")
         return
 
-    opportunity = journey["opportunity"]
-    opportunity_key = journey["opportunity_key"]
-    st.markdown(f"## Jornada da oportunidade #{html.escape(opportunity_key)}")
-
-    summary_cols = st.columns(4)
-    summary_values = [
-        ("Status atual", normalize_text(opportunity.get("status_funil")) or "-"),
-        ("Consultor", normalize_text(opportunity.get("consultor")) or "-"),
-        ("País", journey.get("country") or "-"),
-        (
-            "Primeiro acesso identificado",
-            journey["first_access"].strftime("%d/%m/%Y %H:%M") if journey.get("first_access") is not None else "-",
-        ),
+    converted_html = "<br>".join(html.escape(value) for value in summary["converted"])
+    rows = [
+        ("Primeiro acesso ao site", html.escape(summary["first_origin"])),
+        ("Baixou material", summary["downloaded"]),
+        ("Assinou Newsletter", summary["newsletter"]),
+        ("Converteu", converted_html),
+        ("Oportunidade", summary["opportunity_date"]),
+        ("Consultor", html.escape(summary["consultant"])),
+        ("Status atual", html.escape(summary["status"])),
     ]
-    for col, (label, value) in zip(summary_cols, summary_values):
-        with col:
-            st.caption(label)
-            st.markdown(f"**{html.escape(str(value))}**")
-
-    identity_text = ", ".join(journey.get("emails", []))
-    if identity_text:
-        st.caption(f"Emails confirmados: {identity_text}")
-    if journey.get("related_contacts"):
-        st.warning(
-            "Possíveis contatos relacionados pelo mesmo IP: "
-            + ", ".join(journey["related_contacts"])
-            + ". O mesmo IP pode ser compartilhado por mais de uma pessoa."
-        )
-
-    confidence_labels = {
-        "confirmed": "Confirmado",
-        "browser": "Mesmo navegador",
-        "possible": "Possível · mesmo IP",
-    }
-    event_rows = []
-    for event in journey["events"]:
-        details_html = " · ".join(
-            f"<span><b>{html.escape(label)}:</b> {html.escape(value)}</span>"
-            for label, value in event["details"]
-        )
-        confidence = event["confidence"]
-        event_rows.append(
-            f"""
-            <div class="journey-event journey-event-{confidence}">
-                <span class="journey-dot"></span>
-                <div class="journey-event-meta">
-                    {event["datetime"].strftime("%d/%m/%Y %H:%M")} ·
-                    {html.escape(event["source_label"])} ·
-                    <span class="journey-confidence">{confidence_labels[confidence]}</span>
-                </div>
-                <div class="journey-event-title">{html.escape(event["title"])}</div>
-                <div class="journey-event-details">{details_html}</div>
+    rows_html = "".join(
+        f"""
+        <div class="opportunity-summary-row">
+            <div class="opportunity-summary-label">{label}</div>
+            <div class="opportunity-summary-value">{value}</div>
+        </div>
+        """
+        for label, value in rows
+    )
+    st.sidebar.markdown(
+        f"""
+        <style>
+            .opportunity-summary {{
+                margin-top: 0.7rem;
+                padding-top: 0.7rem;
+                border-top: 1px solid rgba(128, 128, 128, 0.3);
+            }}
+            .opportunity-summary-title {{
+                margin-bottom: 0.55rem;
+                font-size: 0.9rem;
+                font-weight: 650;
+            }}
+            .opportunity-summary-row {{
+                margin-bottom: 0.65rem;
+            }}
+            .opportunity-summary-label {{
+                color: rgba(170, 170, 170, 0.95);
+                font-size: 0.72rem;
+                line-height: 1.25;
+            }}
+            .opportunity-summary-value {{
+                margin-top: 0.08rem;
+                font-size: 0.84rem;
+                font-weight: 550;
+                line-height: 1.4;
+                overflow-wrap: anywhere;
+            }}
+        </style>
+        <div class="opportunity-summary">
+            <div class="opportunity-summary-title">
+                Oportunidade #{html.escape(summary["opportunity_key"])}
             </div>
-            """
-        )
-
-    if not event_rows:
-        st.info("A oportunidade foi encontrada, mas não há eventos vinculados disponíveis.")
-        return
-
-    timeline_html = f"""
-    <style>
-        .journey-timeline {{
-            position: relative;
-            max-height: 720px;
-            margin-top: 0.75rem;
-            padding: 0.25rem 0.5rem 0.25rem 1.25rem;
-            overflow-y: auto;
-            border-left: 1px solid rgba(128, 128, 128, 0.35);
-        }}
-        .journey-event {{
-            position: relative;
-            padding: 0.25rem 0 1.2rem 1rem;
-        }}
-        .journey-dot {{
-            position: absolute;
-            top: 0.45rem;
-            left: -1.58rem;
-            width: 0.65rem;
-            height: 0.65rem;
-            border: 2px solid var(--background-color, #0e1117);
-            border-radius: 50%;
-        }}
-        .journey-event-confirmed .journey-dot {{ background: #22c55e; }}
-        .journey-event-browser .journey-dot {{ background: #3b82f6; }}
-        .journey-event-possible .journey-dot {{ background: #f59e0b; }}
-        .journey-event-meta {{
-            color: rgba(180, 180, 180, 0.95);
-            font-size: 0.75rem;
-            line-height: 1.4;
-        }}
-        .journey-confidence {{ font-weight: 600; }}
-        .journey-event-confirmed .journey-confidence {{ color: #22c55e; }}
-        .journey-event-browser .journey-confidence {{ color: #60a5fa; }}
-        .journey-event-possible .journey-confidence {{ color: #fbbf24; }}
-        .journey-event-title {{
-            margin-top: 0.15rem;
-            font-size: 0.95rem;
-            font-weight: 650;
-            line-height: 1.4;
-        }}
-        .journey-event-details {{
-            margin-top: 0.2rem;
-            color: rgba(190, 190, 190, 0.95);
-            font-size: 0.8rem;
-            line-height: 1.55;
-        }}
-    </style>
-    <div class="journey-timeline">{''.join(event_rows)}</div>
-    """
-    st.markdown(timeline_html, unsafe_allow_html=True)
+            {rows_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_normal_mode(
@@ -3501,18 +3188,6 @@ elif periodo_sel == "Comparar meses":
         st.session_state["compare_aplicado"] = True
 
 st.sidebar.header("Filtros adicionais")
-opportunity_search = st.sidebar.text_input(
-    "Pesquise sobre uma oportunidade:",
-    placeholder="Número da oportunidade",
-    key="opportunity_search",
-)
-
-if normalize_opportunity_key(opportunity_search):
-    with st.spinner("Reconstruindo a jornada da oportunidade..."):
-        opportunity_journey = build_opportunity_journey(company_slug, opportunity_search, dfs)
-    render_opportunity_journey(opportunity_journey)
-    st.markdown("---")
-
 if not compare_mode:
     df_periodo_leads_meta_whatsapp_empty_check = get_effective_period_filtered_df(dfs.get("leads_meta_whatsapp", pd.DataFrame()), periodo_sel, hoje, ontem)
     df_periodo_leads_meta_formulario_empty_check = get_effective_period_filtered_df(dfs.get("leads_meta_formulario", pd.DataFrame()), periodo_sel, hoje, ontem)
@@ -3563,6 +3238,23 @@ origens = sorted(df_for_filters["origem"].dropna().unique().tolist()) if "origem
 origens_sel = st.sidebar.multiselect("Origem", options=origens, default=origens)
 dispositivos = sorted(df_for_filters["dispositivo"].dropna().unique().tolist()) if "dispositivo" in df_for_filters.columns else []
 dispositivos_sel = st.sidebar.multiselect("Dispositivo", options=dispositivos, default=dispositivos)
+
+with st.sidebar.form("opportunity_search_form"):
+    opportunity_search_input = st.text_input(
+        "Pesquise sobre uma oportunidade:",
+        placeholder="Número da oportunidade",
+    )
+    opportunity_search_submitted = st.form_submit_button("Pesquisar", use_container_width=True)
+
+if opportunity_search_submitted:
+    st.session_state["searched_opportunity"] = normalize_opportunity_key(opportunity_search_input)
+
+searched_opportunity = st.session_state.get("searched_opportunity", "")
+if searched_opportunity:
+    with st.sidebar:
+        with st.spinner("Pesquisando..."):
+            opportunity_summary = build_opportunity_summary(company_slug, searched_opportunity, dfs)
+        render_opportunity_summary_sidebar(opportunity_summary)
 
 if compare_mode and st.session_state.get("compare_aplicado", False):
     render_compare_mode(
