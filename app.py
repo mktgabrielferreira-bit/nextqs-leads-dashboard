@@ -2088,6 +2088,7 @@ def campaign_badge_html(campaign_name: str) -> str:
     campaign_key = campaign_name.casefold()
     badge_rules = [
         ("[nextqsbr]-metaads", "br", "meta"),
+        ("[nextqsbr]-instagrambio", "br", "meta"),
         ("[nextqspt]-metaads", "pt", "meta"),
         ("[nextqsbr]-googleads", "br", "google"),
         ("[nextqspt]-googleads", "pt", "google"),
