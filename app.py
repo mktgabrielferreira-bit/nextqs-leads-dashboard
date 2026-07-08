@@ -118,6 +118,7 @@ def get_selected_company() -> dict:
 
 def render_company_selector(current_slug: str):
     def _select_company(slug: str):
+        st.session_state["dashboard_view"] = "leads"
         st.query_params["empresa"] = slug
         st.rerun()
 
@@ -917,6 +918,9 @@ def load_sheet(company_slug: str, sheet_name: str) -> pd.DataFrame:
 
     if df.empty:
         return df
+
+    if sheet_name == "meta_campanhas":
+        return prepare_meta_ads_dataframe(df)
 
     if sheet_name == "oportunidades":
         if "data_oportunidade" in df.columns:
@@ -2594,6 +2598,394 @@ def render_opportunity_summary_sidebar(summary: dict):
     )
 
 
+def parse_meta_ads_number(value) -> float:
+    text = normalize_text(value)
+    if not text:
+        return 0.0
+    text = (
+        text.replace("R$", "")
+        .replace("%", "")
+        .replace("\xa0", " ")
+        .strip()
+    )
+    text = re.sub(r"[^\d,.\-]", "", text)
+    if not text:
+        return 0.0
+    if "," in text:
+        text = text.replace(".", "").replace(",", ".")
+    elif re.fullmatch(r"-?\d{1,3}(\.\d{3})+", text):
+        text = text.replace(".", "")
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def format_brl(value: float | int | None) -> str:
+    if value is None or pd.isna(value):
+        return "R$ 0,00"
+    text = f"R$ {float(value):,.2f}"
+    return text.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def format_int_br(value: float | int | None) -> str:
+    if value is None or pd.isna(value):
+        return "0"
+    return f"{int(round(float(value))):,}".replace(",", ".")
+
+
+def format_percent_br(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "-"
+    return f"{float(value) * 100:.2f}%".replace(".", ",")
+
+
+def get_meta_ads_source_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    if df is None or df.empty:
+        return None
+    normalized_candidates = {
+        strip_accents(candidate).replace(" ", "_").replace("-", "_")
+        for candidate in candidates
+    }
+    for col in df.columns:
+        normalized_col = strip_accents(col).replace(" ", "_").replace("-", "_")
+        if normalized_col in normalized_candidates:
+            return col
+    return None
+
+
+def prepare_meta_ads_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    source_cols = {
+        "mes_ano": ["mês_ano", "mes_ano", "mês ano", "mes ano", "month"],
+        "plataforma": ["plataforma", "platform"],
+        "destino": ["destino", "destination"],
+        "objetivo": ["objetivo", "objective"],
+        "criativo_anuncio": ["criativo_anúncio", "criativo_anuncio", "criativo anúncio", "criativo anuncio", "anuncio", "ad"],
+        "valor_usado": ["valor_usado", "valor usado", "valor utilizado", "gasto", "investimento", "amount spent"],
+        "alcance": ["alcance", "reach"],
+        "impressoes": ["impressões", "impressoes", "impressions"],
+        "resultados": ["resultados", "results"],
+        "custo_por_resultado": ["custo por resultados", "custo_por_resultados", "custo por resultado", "cost per result"],
+        "cliques": ["cliques", "clicks"],
+        "ctr": ["ctr"],
+        "cpm": ["cpm"],
+        "visitas_perfil": ["visitas ao perfil do instagram", "visitas_perfil", "profile visits"],
+    }
+
+    out = pd.DataFrame(index=df.index)
+    for canonical, candidates in source_cols.items():
+        source_col = get_meta_ads_source_col(df, candidates)
+        out[canonical] = df[source_col] if source_col else None
+
+    month_text = out["mes_ano"].fillna("").astype(str).str.strip()
+    out["data_hora"] = pd.to_datetime(month_text + "-01", format="%Y-%m-%d", errors="coerce")
+    missing_dates = out["data_hora"].isna()
+    if missing_dates.any():
+        out.loc[missing_dates, "data_hora"] = pd.to_datetime(
+            month_text[missing_dates],
+            dayfirst=True,
+            errors="coerce",
+        )
+
+    out = out.dropna(subset=["data_hora"]).copy()
+    if out.empty:
+        return out
+
+    text_cols = ["plataforma", "destino", "objetivo", "criativo_anuncio"]
+    for col in text_cols:
+        out[col] = out[col].apply(normalize_empty).fillna("Não informado")
+
+    numeric_cols = [
+        "valor_usado",
+        "alcance",
+        "impressoes",
+        "resultados",
+        "custo_por_resultado",
+        "cliques",
+        "ctr",
+        "cpm",
+        "visitas_perfil",
+    ]
+    for col in numeric_cols:
+        out[col] = out[col].apply(parse_meta_ads_number)
+
+    out["data"] = out["data_hora"].dt.date
+    out["ano"] = out["data_hora"].dt.year.astype(int)
+    out["mes"] = out["data_hora"].dt.month.astype(int)
+    out["mes_label"] = out["mes"].map(MESES_LABEL) + "/" + out["ano"].astype(str)
+    out["mes_ano"] = out["data_hora"].dt.strftime("%Y-%m")
+    return out.sort_values("data_hora")
+
+
+def filter_meta_ads_by_selection(df_meta: pd.DataFrame, ano: int, mes_label: str) -> pd.DataFrame:
+    if df_meta.empty:
+        return df_meta.copy()
+    out = df_meta[df_meta["ano"] == int(ano)].copy()
+    if mes_label != "Todo o ano":
+        out = out[out["mes"] == month_label_to_num(mes_label)].copy()
+    return out
+
+
+def render_meta_ads_filters(df_meta: pd.DataFrame) -> tuple[pd.DataFrame, int | None, str]:
+    st.sidebar.markdown("<h2 style='margin-bottom: 0.25rem;'>Filtros</h2>", unsafe_allow_html=True)
+    if df_meta.empty or "mes_label" not in df_meta.columns:
+        return df_meta.copy(), None, "Todo o ano"
+
+    meses_df = (
+        df_meta[["data_hora", "mes_label"]]
+        .drop_duplicates()
+        .sort_values("data_hora")
+    )
+    opcoes_meses = ["Todo o ano"] + meses_df["mes_label"].tolist()
+    if st.session_state.get("meta_ads_mes_label") not in opcoes_meses:
+        st.session_state["meta_ads_mes_label"] = "Todo o ano"
+    mes_label = st.sidebar.selectbox("Mês", options=opcoes_meses, key="meta_ads_mes_label")
+    if mes_label == "Todo o ano":
+        return df_meta.copy(), None, mes_label
+    return df_meta[df_meta["mes_label"] == mes_label].copy(), None, mes_label
+
+
+def aggregate_meta_ads(df_meta: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
+    if df_meta.empty:
+        return pd.DataFrame(columns=group_cols)
+    grouped = (
+        df_meta.groupby(group_cols, dropna=False)
+        .agg(
+            valor_usado=("valor_usado", "sum"),
+            alcance=("alcance", "sum"),
+            impressoes=("impressoes", "sum"),
+            resultados=("resultados", "sum"),
+            cliques=("cliques", "sum"),
+            visitas_perfil=("visitas_perfil", "sum"),
+        )
+        .reset_index()
+    )
+    grouped["ctr_calc"] = grouped.apply(
+        lambda row: (row["cliques"] / row["impressoes"]) if row["impressoes"] else None,
+        axis=1,
+    )
+    grouped["cpm_calc"] = grouped.apply(
+        lambda row: (row["valor_usado"] / row["impressoes"] * 1000) if row["impressoes"] else None,
+        axis=1,
+    )
+    grouped["custo_por_resultado_calc"] = grouped.apply(
+        lambda row: (row["valor_usado"] / row["resultados"]) if row["resultados"] else None,
+        axis=1,
+    )
+    return grouped
+
+
+def render_meta_ads_dashboard(df_meta: pd.DataFrame, ano_sel: int | None, mes_label: str):
+    st.title("Meta ADS NextQS")
+
+    if df_meta.empty:
+        st.warning("Nenhum dado encontrado na aba 'meta_campanhas' para o filtro selecionado.")
+        return
+
+    periodo = mes_label if mes_label != "Todo o ano" else "Todo o ano"
+    st.markdown(
+        f"""
+        <div style="
+            margin: 6px 0 18px 0;
+            font-size: 14px;
+            font-weight: 700;
+            opacity: 0.82;">
+            {html.escape(periodo)}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    investimento = float(df_meta["valor_usado"].sum())
+    alcance = float(df_meta["alcance"].sum())
+    impressoes = float(df_meta["impressoes"].sum())
+    resultados = float(df_meta["resultados"].sum())
+    cliques = float(df_meta["cliques"].sum())
+    visitas_perfil = float(df_meta["visitas_perfil"].sum())
+    ctr = (cliques / impressoes) if impressoes else None
+    cpm = (investimento / impressoes * 1000) if impressoes else None
+    custo_resultado = (investimento / resultados) if resultados else None
+
+    cols_top = st.columns(4)
+    with cols_top[0]:
+        render_highlight_card("Investimento", format_brl(investimento))
+    with cols_top[1]:
+        render_highlight_card("Resultados", format_int_br(resultados))
+    with cols_top[2]:
+        render_highlight_card("Custo por resultado", format_brl(custo_resultado))
+    with cols_top[3]:
+        render_highlight_card("CTR", format_percent_br(ctr))
+
+    cols_bottom = st.columns(4)
+    with cols_bottom[0]:
+        render_highlight_card("Alcance", format_int_br(alcance))
+    with cols_bottom[1]:
+        render_highlight_card("Impressões", format_int_br(impressoes))
+    with cols_bottom[2]:
+        render_highlight_card("Cliques", format_int_br(cliques))
+    with cols_bottom[3]:
+        render_highlight_card("Visitas ao perfil", format_int_br(visitas_perfil))
+
+    st.markdown("---")
+
+    monthly = aggregate_meta_ads(df_meta, ["ano", "mes", "mes_label"]).sort_values(["ano", "mes"])
+    destino = aggregate_meta_ads(df_meta, ["destino"]).sort_values("valor_usado", ascending=False)
+    objetivo = aggregate_meta_ads(df_meta, ["objetivo"]).sort_values("resultados", ascending=False)
+
+    if mes_label == "Todo o ano" and len(monthly) > 1:
+        st.subheader("Investimento e resultados por mês")
+        fig_month = go.Figure()
+        fig_month.add_trace(
+            go.Bar(
+                x=monthly["mes_label"],
+                y=monthly["valor_usado"],
+                name="Investimento",
+                marker_color=COMPARE_COLOR_1,
+            )
+        )
+        fig_month.add_trace(
+            go.Scatter(
+                x=monthly["mes_label"],
+                y=monthly["resultados"],
+                name="Resultados",
+                mode="lines+markers",
+                yaxis="y2",
+                line=dict(color=COMPARE_COLOR_2, width=3),
+            )
+        )
+        fig_month.update_layout(
+            xaxis_title="Mês",
+            yaxis_title="Investimento",
+            yaxis2=dict(title="Resultados", overlaying="y", side="right"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        )
+        st.plotly_chart(fig_month, use_container_width=True)
+
+    col_chart_1, col_chart_2 = st.columns(2)
+    with col_chart_1:
+        st.subheader("Resultados por destino")
+        if destino.empty:
+            st.info("Nenhum destino encontrado no período.")
+        else:
+            fig_destino = px.bar(destino, x="destino", y="resultados", color="destino")
+            fig_destino.update_layout(xaxis_title="Destino", yaxis_title="Resultados", showlegend=False)
+            st.plotly_chart(fig_destino, use_container_width=True)
+
+    with col_chart_2:
+        st.subheader("Investimento por objetivo")
+        if objetivo.empty:
+            st.info("Nenhum objetivo encontrado no período.")
+        else:
+            fig_objetivo = px.bar(objetivo, x="objetivo", y="valor_usado", color="objetivo")
+            fig_objetivo.update_layout(xaxis_title="Objetivo", yaxis_title="Investimento", showlegend=False)
+            st.plotly_chart(fig_objetivo, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("Criativos por resultado e custo")
+    creative = aggregate_meta_ads(df_meta, ["criativo_anuncio", "destino", "objetivo"])
+    creative = creative[creative["valor_usado"] > 0].copy()
+    if creative.empty:
+        st.info("Nenhum criativo encontrado no período.")
+    else:
+        creative["criativo_curto"] = creative["criativo_anuncio"].apply(
+            lambda value: unquote(urlparse(normalize_text(value)).path.rstrip("/").split("/")[-1])
+            if normalize_text(value).startswith("http")
+            else normalize_text(value)
+        )
+        fig_creative = px.scatter(
+            creative,
+            x="custo_por_resultado_calc",
+            y="resultados",
+            size="valor_usado",
+            color="destino",
+            hover_name="criativo_curto",
+            hover_data={
+                "objetivo": True,
+                "valor_usado": ":.2f",
+                "cliques": ":.0f",
+                "impressoes": ":.0f",
+                "custo_por_resultado_calc": ":.2f",
+            },
+        )
+        fig_creative.update_layout(
+            xaxis_title="Custo por resultado",
+            yaxis_title="Resultados",
+        )
+        st.plotly_chart(fig_creative, use_container_width=True)
+
+    st.markdown("### Informações por destino")
+    destino_table = destino.copy()
+    if destino_table.empty:
+        st.info("Nenhuma informação por destino encontrada.")
+    else:
+        destino_table = destino_table.rename(columns={"destino": "Destino"})
+        destino_table["Investimento"] = destino_table["valor_usado"].apply(format_brl)
+        destino_table["Alcance"] = destino_table["alcance"].apply(format_int_br)
+        destino_table["Impressões"] = destino_table["impressoes"].apply(format_int_br)
+        destino_table["Resultados"] = destino_table["resultados"].apply(format_int_br)
+        destino_table["Custo por resultado"] = destino_table["custo_por_resultado_calc"].apply(format_brl)
+        destino_table["Cliques"] = destino_table["cliques"].apply(format_int_br)
+        destino_table["CTR"] = destino_table["ctr_calc"].apply(format_percent_br)
+        destino_table["CPM"] = destino_table["cpm_calc"].apply(format_brl)
+        destino_table["Visitas ao perfil"] = destino_table["visitas_perfil"].apply(format_int_br)
+        st.dataframe(
+            destino_table[
+                [
+                    "Destino",
+                    "Investimento",
+                    "Alcance",
+                    "Impressões",
+                    "Resultados",
+                    "Custo por resultado",
+                    "Cliques",
+                    "CTR",
+                    "CPM",
+                    "Visitas ao perfil",
+                ]
+            ],
+            use_container_width=True,
+            height=260,
+        )
+
+    st.markdown("### Informações por criativo")
+    creative_table = creative.sort_values(["resultados", "valor_usado"], ascending=False).copy()
+    if creative_table.empty:
+        st.info("Nenhuma informação por criativo encontrada.")
+    else:
+        creative_table["Investimento"] = creative_table["valor_usado"].apply(format_brl)
+        creative_table["Resultados"] = creative_table["resultados"].apply(format_int_br)
+        creative_table["Custo por resultado"] = creative_table["custo_por_resultado_calc"].apply(format_brl)
+        creative_table["Cliques"] = creative_table["cliques"].apply(format_int_br)
+        creative_table["CTR"] = creative_table["ctr_calc"].apply(format_percent_br)
+        creative_table["CPM"] = creative_table["cpm_calc"].apply(format_brl)
+        st.dataframe(
+            creative_table.rename(
+                columns={
+                    "criativo_anuncio": "Criativo",
+                    "destino": "Destino",
+                    "objetivo": "Objetivo",
+                }
+            )[
+                [
+                    "Criativo",
+                    "Destino",
+                    "Objetivo",
+                    "Investimento",
+                    "Resultados",
+                    "Custo por resultado",
+                    "Cliques",
+                    "CTR",
+                    "CPM",
+                ]
+            ],
+            use_container_width=True,
+            height=420,
+        )
+
+
 def render_normal_mode(
     company_slug: str,
     dfs: dict,
@@ -2955,6 +3347,7 @@ if logo_path.exists():
 # ---------------------------------------------------------------------------
 st.session_state.setdefault("sync_message", None)
 st.session_state.setdefault("open_upload_panel", False)
+st.session_state.setdefault("dashboard_view", "leads")
 
 st.sidebar.markdown(
     """
@@ -3036,6 +3429,18 @@ with st.sidebar:
 
     refresh_clicked = st.button("Atualizar Dashboard", use_container_width=True)
     render_company_selector(company_slug)
+    if st.button(
+        "Meta ADS NextQS",
+        use_container_width=True,
+        disabled=st.session_state.get("dashboard_view") == "meta_ads_nextqs" and company_slug == "nextqs",
+    ):
+        st.session_state["dashboard_view"] = "meta_ads_nextqs"
+        st.query_params["empresa"] = "nextqs"
+        st.rerun()
+    if st.session_state.get("dashboard_view") == "meta_ads_nextqs":
+        if st.button("Dashboard de Leads", use_container_width=True):
+            st.session_state["dashboard_view"] = "leads"
+            st.rerun()
 
     if ultima_data_smark:
         st.markdown(
@@ -3100,6 +3505,16 @@ if refresh_clicked:
     if ultima_data_refresh:
         st.session_state["ultima_data_smark"] = ultima_data_refresh
     trigger_sheet_reload()
+
+if st.session_state.get("dashboard_view") == "meta_ads_nextqs":
+    df_meta_ads = load_sheet("nextqs", "meta_campanhas")
+    if df_meta_ads.empty:
+        st.warning("Nenhum dado encontrado na aba 'meta_campanhas' da planilha NextQS.")
+        st.stop()
+
+    df_meta_ads_filtrado, meta_ads_ano, meta_ads_mes_label = render_meta_ads_filters(df_meta_ads)
+    render_meta_ads_dashboard(df_meta_ads_filtrado, meta_ads_ano, meta_ads_mes_label)
+    st.stop()
 
 dfs = {name: load_sheet(company_slug, name) for name in SHEETS_REQUIRED}
 for name in OPTIONAL_SHEETS:
