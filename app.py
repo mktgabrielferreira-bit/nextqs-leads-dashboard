@@ -2870,14 +2870,13 @@ def add_meta_ads_segment_metrics(df_grouped: pd.DataFrame, kind: str) -> pd.Data
     return out
 
 
-def render_meta_ads_segment_charts(title: str, df_segment: pd.DataFrame, kind: str, mes_label: str):
+def render_meta_ads_segment_charts(df_segment: pd.DataFrame, kind: str, mes_label: str):
     if df_segment.empty:
         return
 
     principal_label = "Leads" if kind == "lead" else "Visitas ao perfil"
     custo_label = "Custo por Lead" if kind == "lead" else "Custo por visita"
 
-    st.markdown(f"### {title}")
     monthly = add_meta_ads_segment_metrics(
         aggregate_meta_ads(df_segment, ["ano", "mes", "mes_label"]).sort_values(["ano", "mes"]),
         kind,
@@ -3008,11 +3007,9 @@ def render_meta_ads_dashboard(df_meta: pd.DataFrame, ano_sel: int | None, mes_la
         st.markdown("---")
     render_meta_ads_metric_cards("Crescimento do Instagram", df_growth, "growth")
 
-    st.markdown("---")
-    render_meta_ads_segment_charts("Campanhas de Lead", df_leads, "lead", mes_label)
-    if not df_leads.empty and not df_growth.empty:
+    if not df_leads.empty:
         st.markdown("---")
-    render_meta_ads_segment_charts("Crescimento do Instagram", df_growth, "growth", mes_label)
+        render_meta_ads_segment_charts(df_leads, "lead", mes_label)
 
     st.markdown("---")
     st.markdown("### Informações por destino")
