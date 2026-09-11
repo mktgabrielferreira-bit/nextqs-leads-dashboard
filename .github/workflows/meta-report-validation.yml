@@ -1,0 +1,49 @@
+name: Validar coleta mensal Meta
+
+on:
+  workflow_dispatch:
+    inputs:
+      month:
+        description: 'Mês encerrado (YYYY-MM); vazio usa o mês anterior'
+        required: false
+        type: string
+
+# Ativar somente depois da reconciliação com o Gerenciador e teste da escrita:
+#  schedule:
+#    - cron: '0 0 2 * *'
+#      timezone: America/Sao_Paulo
+# O GitHub pode atrasar execuções. Repositórios públicos inativos por 60 dias
+# podem ter o agendamento desativado automaticamente.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nextqs-meta-report
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Testar transformação e preservação de dados
+        run: python -m unittest discover -s tests -p 'test_meta_report.py' -v
+      - name: Consultar API sem escrever na planilha
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_API_VERSION: v26.0
+          REPORT_MONTH: ${{ inputs.month }}
+        shell: bash
+        run: |
+          args=(--output "$RUNNER_TEMP/nextqs-meta")
+          if [ -n "$REPORT_MONTH" ]; then args+=(--month "$REPORT_MONTH"); fi
+          python integrations/meta_report.py "${args[@]}"
+      - name: Remover dados temporários do runner
+        if: always()
+        shell: bash
+        run: rm -rf -- "$RUNNER_TEMP/nextqs-meta"
