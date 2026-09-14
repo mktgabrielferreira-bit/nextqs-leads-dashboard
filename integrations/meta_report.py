@@ -444,7 +444,8 @@ def reconcile_sheet(raw, existing):
             str(adset.get("optimization_goal", "")),
             promoted_fields,
             str(adset.get("promoted_object", {}).get("custom_event_type", "")),
-            _name_tags(meta_row.get("campaign_name"), meta_row.get("adset_name")),
+            _name_tags(meta_row.get("campaign_name"), meta_row.get("adset_name"),
+                       meta_row.get("ad_name")),
         )
         previous = classifications.setdefault(classification_key, objective)
         if previous != objective:
