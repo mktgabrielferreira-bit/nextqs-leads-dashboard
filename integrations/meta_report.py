@@ -426,6 +426,7 @@ def reconcile_sheet(raw, existing):
             str(adset.get("destination_type", "")),
             str(adset.get("optimization_goal", "")),
             promoted_fields,
+            str(adset.get("promoted_object", {}).get("custom_event_type", "")),
         )
         previous = classifications.setdefault(classification_key, objective)
         if previous != objective:
@@ -434,6 +435,7 @@ def reconcile_sheet(raw, existing):
                 f"destination_type={classification_key[0]}, "
                 f"optimization_goal={classification_key[1]}, "
                 f"promoted_object_fields={','.join(classification_key[2]) or 'nenhum'}: "
+                f"custom_event_type={classification_key[3] or 'nenhum'}: "
                 + ",".join(sorted((previous, objective)))
             )
 
@@ -490,7 +492,8 @@ def reconcile_sheet(raw, existing):
         "matched_by_metrics": matched_by_metrics,
         "classification_rules": [
             {"destination_type": key[0], "optimization_goal": key[1],
-             "promoted_object_fields": list(key[2]), "objetivo": value}
+             "promoted_object_fields": list(key[2]),
+             "custom_event_type": key[3], "objetivo": value}
             for key, value in sorted(classifications.items())
         ],
         "result_metric_candidates": result_candidates,
