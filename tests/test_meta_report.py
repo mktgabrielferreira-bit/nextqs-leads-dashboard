@@ -3,8 +3,8 @@ import unittest
 from datetime import date
 from integrations.meta_report import (
     ACCOUNT_ID, HEADERS, MetaClient, ReportError, action_value,
-    _action_relation_counts, _name_tags, month_bounds, numeric, plan_updates, reconcile_sheet,
-    report_rows, sheet_month,
+    _action_relation_counts, _creative_signature, _name_tags, month_bounds, numeric,
+    plan_updates, reconcile_sheet, report_rows, sheet_month,
 )
 
 
@@ -43,6 +43,18 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(_name_tags("LEADS | WhatsApp", "Perfil Instagram"),
                          ("instagram", "whatsapp"))
         self.assertEqual(_name_tags("Cliente confidencial"), ())
+
+    def test_creative_signature_does_not_expose_urls(self):
+        signature = _creative_signature({
+            "call_to_action_type": "LEARN_MORE",
+            "object_story_spec": {"link_data": {
+                "link": "https://example.com/segredo",
+                "call_to_action": {"type": "WHATSAPP_MESSAGE", "value": {
+                    "link": "https://wa.me/5511999999999"}},
+            }},
+        })
+        self.assertEqual(signature, (("LEARN_MORE", "WHATSAPP_MESSAGE"),
+                                     ("site", "whatsapp")))
 
     def test_safe_action_diagnostic_reports_only_relations(self):
         rows = [
@@ -163,6 +175,8 @@ class SheetTests(unittest.TestCase):
             "promoted_object_fields": [],
             "custom_event_type": "",
             "name_tags": [],
+            "cta_types": [],
+            "destination_categories": ["instagram"],
             "objetivo": "Conversas"}])
         self.assertEqual(result["result_metric_candidates"]["Conversas"],
                          ["action:chosen_event", "action:overlapping_event"])

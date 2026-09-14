@@ -145,7 +145,10 @@ def collect(client, month, today=None):
     for row in rows:
         ad_id = str(row["ad_id"])
         if ad_id not in ads:
-            ads[ad_id] = client.get(ad_id, {"fields": "id,name,creative{id,name,instagram_permalink_url,effective_object_story_id}"})
+            ads[ad_id] = client.get(ad_id, {"fields": (
+                "id,name,creative{id,name,instagram_permalink_url,effective_object_story_id,"
+                "call_to_action_type,link_url,object_url,object_story_spec,asset_feed_spec}"
+            )})
         adset_id = str(row["adset_id"])
         if adset_id not in adsets:
             adsets[adset_id] = client.get(adset_id, {"fields": "id,name,destination_type,optimization_goal,attribution_spec,promoted_object"})
@@ -336,6 +339,40 @@ def _name_tags(*values):
     return tuple(sorted(tag for tag, pattern in patterns.items() if re.search(pattern, text)))
 
 
+def _creative_signature(creative):
+    """Reduce creative destinations to safe enums; never return URLs or text."""
+    cta_types = set()
+    destination_types = set()
+
+    def inspect(value, parent_key=""):
+        if isinstance(value, dict):
+            if parent_key == "call_to_action" and value.get("type"):
+                cta_types.add(str(value["type"]).upper())
+            for key, child in value.items():
+                if key == "call_to_action_type" and child:
+                    cta_types.add(str(child).upper())
+                inspect(child, key)
+        elif isinstance(value, list):
+            for child in value:
+                inspect(child, parent_key)
+        elif isinstance(value, str):
+            parsed = urlparse(value.strip())
+            host = (parsed.hostname or "").lower()
+            if not host:
+                return
+            if host == "wa.me" or host.endswith(".whatsapp.com") or host == "whatsapp.com":
+                destination_types.add("whatsapp")
+            elif host == "instagram.com" or host.endswith(".instagram.com"):
+                destination_types.add("instagram")
+            elif host == "facebook.com" or host.endswith(".facebook.com") or host == "fb.me":
+                destination_types.add("facebook")
+            else:
+                destination_types.add("site")
+
+    inspect(creative or {})
+    return tuple(sorted(cta_types)), tuple(sorted(destination_types))
+
+
 def _action_relation_counts(rows):
     """Describe candidate actions without exposing report values."""
     relevant = ("lead", "messag", "conversation", "profile", "contact")
@@ -439,6 +476,7 @@ def reconcile_sheet(raw, existing):
             raise ReportError("Objetivo ou destino não corresponde ao padrão do dashboard.")
         adset = raw["adsets"].get(str(meta_row.get("adset_id")), {})
         promoted_fields = tuple(sorted(str(key) for key in adset.get("promoted_object", {})))
+        creative_signature = _creative_signature(creative)
         classification_key = (
             str(adset.get("destination_type", "")),
             str(adset.get("optimization_goal", "")),
@@ -446,6 +484,8 @@ def reconcile_sheet(raw, existing):
             str(adset.get("promoted_object", {}).get("custom_event_type", "")),
             _name_tags(meta_row.get("campaign_name"), meta_row.get("adset_name"),
                        meta_row.get("ad_name")),
+            creative_signature[0],
+            creative_signature[1],
         )
         previous = classifications.setdefault(classification_key, objective)
         if previous != objective:
@@ -456,6 +496,8 @@ def reconcile_sheet(raw, existing):
                 f"promoted_object_fields={','.join(classification_key[2]) or 'nenhum'}: "
                 f"custom_event_type={classification_key[3] or 'nenhum'}: "
                 f"name_tags={','.join(classification_key[4]) or 'nenhuma'}: "
+                f"cta_types={','.join(classification_key[5]) or 'nenhum'}: "
+                f"destination_categories={','.join(classification_key[6]) or 'nenhuma'}: "
                 + ",".join(sorted((previous, objective)))
             )
 
@@ -514,6 +556,7 @@ def reconcile_sheet(raw, existing):
             {"destination_type": key[0], "optimization_goal": key[1],
              "promoted_object_fields": list(key[2]),
              "custom_event_type": key[3], "name_tags": list(key[4]),
+             "cta_types": list(key[5]), "destination_categories": list(key[6]),
              "objetivo": value}
             for key, value in sorted(classifications.items())
         ],
