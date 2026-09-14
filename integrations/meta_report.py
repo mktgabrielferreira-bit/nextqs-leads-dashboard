@@ -9,6 +9,7 @@ import json
 import os
 import re
 import time
+from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -26,6 +27,7 @@ HEADERS = ["mês_ano", "plataforma", "destino", "objetivo", "criativo_anúncio",
 PLATFORMS = {"facebook": "Facebook", "instagram": "Instagram"}
 DESTINATIONS = {"Conversas": "Whatsapp", "Visitas ao Perfil do Instagram": "Instagram",
                 "Lead Site": "Site", "Lead Formulário": "Formulário Meta"}
+GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 class ReportError(Exception):
@@ -134,8 +136,7 @@ def collect(client, month, today=None):
         raise ReportError("Conta ou moeda divergente da NEXTQS Brasil.")
     common = {"time_range": {"since": start, "until": end}, "time_increment": "all_days",
               "use_unified_attribution_setting": True, "action_report_time": "impression", "limit": 100}
-    fields = "account_id,ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,date_start,date_stop,spend,reach,impressions,inline_link_clicks,actions"
-    # Optional metrics are enabled only after compatibility is verified against the live API.
+    fields = "account_id,ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,date_start,date_stop,spend,reach,impressions,inline_link_clicks,instagram_profile_visits,actions"
     rows = client.pages("act_" + ACCOUNT_ID + "/insights", dict(common, level="ad", breakdowns=["publisher_platform"], fields=fields))
     totals = client.pages("act_" + ACCOUNT_ID + "/insights", dict(common, level="account", fields="spend,reach,impressions,date_start,date_stop"))
     ads = {}
@@ -243,11 +244,151 @@ def plan_updates(existing, proposed, month):
     return changes
 
 
+def load_sheet_rows(credentials_json):
+    """Read unformatted values from the existing worksheet without changing it."""
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        info = json.loads(credentials_json or "")
+        credentials = Credentials.from_service_account_info(info, scopes=GOOGLE_SCOPES)
+        worksheet = gspread.authorize(credentials).open_by_key(SPREADSHEET_ID).worksheet("meta_campanhas")
+        return worksheet.get("A1:P", value_render_option="UNFORMATTED_VALUE")
+    except (ValueError, TypeError, KeyError):
+        raise ReportError("Credencial Google inválida; nenhuma escrita realizada.") from None
+    except Exception:
+        # Provider exceptions may contain request details. Keep CI logs generic.
+        raise ReportError("Não foi possível ler meta_campanhas com a conta de serviço.") from None
+
+
+def sheet_number(value):
+    if isinstance(value, bool) or value is None:
+        raise ReportError("Valor numérico inválido na planilha.")
+    if isinstance(value, (int, float, Decimal)):
+        return numeric(value)
+    text = str(value).strip().replace("\u00a0", "").replace("R$", "").replace("%", "")
+    if not text:
+        return Decimal(0)
+    if "," in text:
+        text = text.replace(".", "").replace(",", ".")
+    return numeric(text)
+
+
+def normalized_url(value):
+    parsed = urlparse(str(value or "").strip())
+    host = (parsed.hostname or "").lower()
+    if host not in ("instagram.com", "www.instagram.com", "facebook.com", "www.facebook.com"):
+        raise ReportError("Link de criativo inválido na reconciliação.")
+    return host.removeprefix("www.") + parsed.path.rstrip("/")
+
+
+def _assert_close(label, actual, expected, tolerance=Decimal(0)):
+    if abs(actual - expected) > tolerance:
+        raise ReportError(f"Reconciliação divergente em {label}; nenhuma escrita realizada.")
+
+
+def _candidate_metrics(row, expected):
+    if expected == 0:
+        return set()
+    candidates = set()
+    for action in row.get("actions", []):
+        if action.get("action_type") and numeric(action.get("value")) == expected:
+            candidates.add("action:" + action["action_type"])
+    if "instagram_profile_visits" in row and numeric(row["instagram_profile_visits"]) == expected:
+        candidates.add("field:instagram_profile_visits")
+    return candidates
+
+
+def reconcile_sheet(raw, existing):
+    """Compare Meta with the manually prepared closed month, without exposing row data."""
+    if not existing or list(existing[0][:16]) != HEADERS:
+        raise ReportError("Cabeçalhos da planilha mudaram; nenhuma escrita realizada.")
+    month_rows = [(row + [""] * 16)[:16] for row in existing[1:] if row and str(row[0]) == raw["month"]]
+    if not month_rows:
+        raise ReportError("O mês de validação não existe na planilha.")
+    sheet_index = {}
+    for row in month_rows:
+        key = (str(row[1]), normalized_url(row[4]))
+        if key in sheet_index:
+            raise ReportError("Há criativo/plataforma duplicado no mês de validação.")
+        sheet_index[key] = row
+
+    used = set()
+    classifications = {}
+    result_sets = defaultdict(list)
+    visits_sets = []
+    for meta_row in raw["rows"]:
+        platform = PLATFORMS.get(meta_row.get("publisher_platform"))
+        creative = raw["ads"].get(str(meta_row.get("ad_id")), {}).get("creative", {})
+        key = (platform, normalized_url(creative.get("instagram_permalink_url")))
+        if not platform or key not in sheet_index or key in used:
+            raise ReportError("Não foi possível relacionar cada anúncio a uma linha da planilha.")
+        used.add(key)
+        sheet_row = sheet_index[key]
+        _assert_close("investimento", numeric(meta_row["spend"]), sheet_number(sheet_row[5]), Decimal("0.02"))
+        _assert_close("alcance", numeric(meta_row["reach"]), sheet_number(sheet_row[6]))
+        _assert_close("impressões", numeric(meta_row["impressions"]), sheet_number(sheet_row[7]))
+        _assert_close("cliques no link", numeric(meta_row.get("inline_link_clicks", 0)), sheet_number(sheet_row[10]))
+        impressions = numeric(meta_row["impressions"])
+        clicks = numeric(meta_row.get("inline_link_clicks", 0))
+        spend = numeric(meta_row["spend"])
+        _assert_close("CTR", clicks / impressions if impressions else Decimal(0), sheet_number(sheet_row[11]), Decimal("0.0001"))
+        _assert_close("CPM", spend * 1000 / impressions if impressions else Decimal(0), sheet_number(sheet_row[12]), Decimal("0.02"))
+
+        objective = str(sheet_row[3])
+        if objective not in DESTINATIONS or str(sheet_row[2]) != DESTINATIONS[objective]:
+            raise ReportError("Objetivo ou destino não corresponde ao padrão do dashboard.")
+        adset = raw["adsets"].get(str(meta_row.get("adset_id")), {})
+        classification_key = (str(adset.get("destination_type", "")), str(adset.get("optimization_goal", "")))
+        previous = classifications.setdefault(classification_key, objective)
+        if previous != objective:
+            raise ReportError("A classificação automática de objetivo ficou ambígua.")
+
+        expected_result = sheet_number(sheet_row[8])
+        candidates = _candidate_metrics(meta_row, expected_result)
+        if expected_result and not candidates:
+            raise ReportError("A métrica Resultados não foi localizada na resposta da Meta.")
+        if candidates:
+            result_sets[objective].append(candidates)
+        expected_visits = sheet_number(sheet_row[13])
+        visit_candidates = _candidate_metrics(meta_row, expected_visits)
+        if expected_visits and not visit_candidates:
+            raise ReportError("A métrica Visitas ao perfil não foi localizada na resposta da Meta.")
+        if visit_candidates:
+            visits_sets.append(visit_candidates)
+
+    if used != set(sheet_index):
+        raise ReportError("Existem linhas na planilha sem anúncio correspondente na Meta.")
+    total_sheet_spend = sum((sheet_number(row[5]) for row in month_rows), Decimal(0))
+    total_meta_spend = sum((numeric(row["spend"]) for row in raw["totals"]), Decimal(0))
+    _assert_close("total investido", total_meta_spend, total_sheet_spend, Decimal("0.02"))
+
+    result_candidates = {}
+    for objective, sets in result_sets.items():
+        shared = set.intersection(*sets)
+        if not shared:
+            raise ReportError("A métrica Resultados não é consistente para um objetivo.")
+        result_candidates[objective] = sorted(shared)
+    visit_candidates = sorted(set.intersection(*visits_sets)) if visits_sets else []
+    if visits_sets and not visit_candidates:
+        raise ReportError("A métrica Visitas ao perfil não é consistente.")
+    return {
+        "month": raw["month"],
+        "matched_rows": len(used),
+        "classification_rules": [
+            {"destination_type": key[0], "optimization_goal": key[1], "objetivo": value}
+            for key, value in sorted(classifications.items())
+        ],
+        "result_metric_candidates": result_candidates,
+        "profile_visits_metric_candidates": visit_candidates,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--month", default=None)
     parser.add_argument("--output", required=True)
     parser.add_argument("--mapping", default=None)
+    parser.add_argument("--check-sheet", action="store_true")
     args = parser.parse_args()
     try:
         client = MetaClient(os.environ.get("META_ACCESS_TOKEN"), os.environ.get("META_API_VERSION", "v26.0"))
@@ -260,7 +401,13 @@ def main():
             mapping = json.loads(Path(args.mapping).read_text(encoding="utf-8"))
             prepared = report_rows(raw, mapping)
             (output / "meta_preview.json").write_text(json.dumps({"headers": HEADERS[:14], "rows": prepared}, ensure_ascii=False, indent=2), encoding="utf-8")
-        print("Coleta concluída. Nenhuma alteração foi feita na planilha.")
+        if args.check_sheet:
+            existing = load_sheet_rows(os.environ.get("GCP_SERVICE_ACCOUNT_JSON"))
+            reconciliation = reconcile_sheet(raw, existing)
+            (output / "reconciliation.json").write_text(json.dumps(reconciliation, ensure_ascii=False, indent=2), encoding="utf-8")
+            print("Reconciliação concluída sem escrita: " + json.dumps(reconciliation, ensure_ascii=False, sort_keys=True))
+        else:
+            print("Coleta concluída. Nenhuma alteração foi feita na planilha.")
     except ReportError as error:
         parser.exit(1, str(error) + "\n")
 

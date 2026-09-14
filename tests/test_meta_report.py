@@ -3,7 +3,7 @@ import unittest
 from datetime import date
 from integrations.meta_report import (
     ACCOUNT_ID, HEADERS, MetaClient, ReportError, action_value,
-    month_bounds, numeric, plan_updates, report_rows,
+    month_bounds, numeric, plan_updates, reconcile_sheet, report_rows,
 )
 
 
@@ -16,7 +16,8 @@ def fixture():
                         {"action_type": "profile_event", "value": "3"}])
     raw = dict(month="2024-02", account={"account_id": ACCOUNT_ID}, rows=[row],
                totals=[{"spend": "100"}], ads={"1": {"creative": {
-                   "instagram_permalink_url": "https://www.instagram.com/p/example/"}}})
+                   "instagram_permalink_url": "https://www.instagram.com/p/example/"}}},
+               adsets={"2": {"destination_type": "WHATSAPP", "optimization_goal": "CONVERSATIONS"}})
     mapping = {"adsets": {"2": {"validated": True, "objetivo": "Conversas",
                "result_metric": {"action_type": "chosen_event"},
                "profile_visits_metric": {"action_type": "profile_event"}}}}
@@ -115,6 +116,28 @@ class SheetTests(unittest.TestCase):
         raw, mapping = fixture()
         with self.assertRaises(ReportError):
             plan_updates([["changed"]], report_rows(raw, mapping), "2024-02")
+
+    def test_reconciles_existing_month_and_discovers_standard_rules(self):
+        raw, _ = fixture()
+        row = ["2024-02", "Instagram", "Whatsapp", "Conversas",
+               "https://www.instagram.com/p/example", 100, 800, 1000, 5, 20,
+               20, .02, 100, 3, 0, 0]
+        result = reconcile_sheet(raw, [HEADERS[:], row])
+        self.assertEqual(result["matched_rows"], 1)
+        self.assertEqual(result["classification_rules"], [{
+            "destination_type": "WHATSAPP", "optimization_goal": "CONVERSATIONS",
+            "objetivo": "Conversas"}])
+        self.assertEqual(result["result_metric_candidates"]["Conversas"],
+                         ["action:chosen_event", "action:overlapping_event"])
+        self.assertEqual(result["profile_visits_metric_candidates"], ["action:profile_event"])
+
+    def test_reconciliation_blocks_changed_base_metric(self):
+        raw, _ = fixture()
+        row = ["2024-02", "Instagram", "Whatsapp", "Conversas",
+               "https://www.instagram.com/p/example", 99, 800, 1000, 5, 20,
+               20, .02, 100, 3, 0, 0]
+        with self.assertRaises(ReportError):
+            reconcile_sheet(raw, [HEADERS[:], row])
 
 
 class PaginationTests(unittest.TestCase):
