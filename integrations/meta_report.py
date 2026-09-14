@@ -421,10 +421,21 @@ def reconcile_sheet(raw, existing):
         if objective not in DESTINATIONS or str(sheet_row[2]) != DESTINATIONS[objective]:
             raise ReportError("Objetivo ou destino não corresponde ao padrão do dashboard.")
         adset = raw["adsets"].get(str(meta_row.get("adset_id")), {})
-        classification_key = (str(adset.get("destination_type", "")), str(adset.get("optimization_goal", "")))
+        promoted_fields = tuple(sorted(str(key) for key in adset.get("promoted_object", {})))
+        classification_key = (
+            str(adset.get("destination_type", "")),
+            str(adset.get("optimization_goal", "")),
+            promoted_fields,
+        )
         previous = classifications.setdefault(classification_key, objective)
         if previous != objective:
-            raise ReportError("A classificação automática de objetivo ficou ambígua.")
+            raise ReportError(
+                "A classificação automática de objetivo ficou ambígua para "
+                f"destination_type={classification_key[0]}, "
+                f"optimization_goal={classification_key[1]}, "
+                f"promoted_object_fields={','.join(classification_key[2]) or 'nenhum'}: "
+                + ",".join(sorted((previous, objective)))
+            )
 
         expected_result = sheet_number(sheet_row[8])
         result_diagnostic_rows[objective].append((meta_row, expected_result))
@@ -478,7 +489,8 @@ def reconcile_sheet(raw, existing):
         "matched_by_url": matched_by_url,
         "matched_by_metrics": matched_by_metrics,
         "classification_rules": [
-            {"destination_type": key[0], "optimization_goal": key[1], "objetivo": value}
+            {"destination_type": key[0], "optimization_goal": key[1],
+             "promoted_object_fields": list(key[2]), "objetivo": value}
             for key, value in sorted(classifications.items())
         ],
         "result_metric_candidates": result_candidates,

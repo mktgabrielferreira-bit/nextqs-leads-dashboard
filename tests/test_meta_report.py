@@ -155,6 +155,7 @@ class SheetTests(unittest.TestCase):
         self.assertEqual(result["matched_by_metrics"], 0)
         self.assertEqual(result["classification_rules"], [{
             "destination_type": "WHATSAPP", "optimization_goal": "CONVERSATIONS",
+            "promoted_object_fields": [],
             "objetivo": "Conversas"}])
         self.assertEqual(result["result_metric_candidates"]["Conversas"],
                          ["action:chosen_event", "action:overlapping_event"])
