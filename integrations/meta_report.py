@@ -277,7 +277,10 @@ def apply_sheet_updates(credentials_json, updates):
     if not updates:
         raise ReportError("Nenhuma atualização válida foi planejada.")
     try:
-        open_sheet(credentials_json).batch_update(updates, value_input_option="RAW")
+        worksheet = open_sheet(credentials_json)
+        if worksheet.col_count < 19:
+            worksheet.resize(cols=19)
+        worksheet.batch_update(updates, value_input_option="RAW")
     except ReportError:
         raise
     except Exception:
