@@ -339,6 +339,8 @@ def reconcile_sheet(raw, existing):
     classifications = {}
     result_sets = defaultdict(list)
     visits_sets = []
+    missing_result_actions = defaultdict(set)
+    missing_visit_actions = set()
     for meta_row in raw["rows"]:
         platform = PLATFORMS.get(meta_row.get("publisher_platform"))
         creative = raw["ads"].get(str(meta_row.get("ad_id")), {}).get("creative", {})
@@ -391,13 +393,20 @@ def reconcile_sheet(raw, existing):
         expected_result = sheet_number(sheet_row[8])
         candidates = _candidate_metrics(meta_row, expected_result)
         if expected_result and not candidates:
-            raise ReportError("A métrica Resultados não foi localizada na resposta da Meta.")
+            missing_result_actions[objective].update(
+                action.get("action_type", "") for action in meta_row.get("actions", [])
+                if any(term in action.get("action_type", "").lower()
+                       for term in ("lead", "messag", "conversation", "profile", "contact"))
+            )
         if candidates:
             result_sets[objective].append(candidates)
         expected_visits = sheet_number(sheet_row[13])
         visit_candidates = _candidate_metrics(meta_row, expected_visits)
         if expected_visits and not visit_candidates:
-            raise ReportError("A métrica Visitas ao perfil não foi localizada na resposta da Meta.")
+            missing_visit_actions.update(
+                action.get("action_type", "") for action in meta_row.get("actions", [])
+                if "profile" in action.get("action_type", "").lower()
+            )
         if visit_candidates:
             visits_sets.append(visit_candidates)
 
@@ -406,6 +415,16 @@ def reconcile_sheet(raw, existing):
     total_sheet_spend = sum((sheet_number(row[5]) for row in month_rows), Decimal(0))
     total_meta_spend = sum((numeric(row["spend"]) for row in raw["totals"]), Decimal(0))
     _assert_close("total investido", total_meta_spend, total_sheet_spend, Decimal("0.02"))
+
+    if missing_result_actions:
+        summary = "; ".join(
+            objective + ": " + ",".join(sorted(filter(None, actions)))
+            for objective, actions in sorted(missing_result_actions.items())
+        )
+        raise ReportError("Resultados sem correspondência exata. Ações relevantes: " + summary)
+    if missing_visit_actions:
+        raise ReportError("Visitas sem correspondência exata. Ações relevantes: " +
+                          ",".join(sorted(filter(None, missing_visit_actions))))
 
     result_candidates = {}
     for objective, sets in result_sets.items():
