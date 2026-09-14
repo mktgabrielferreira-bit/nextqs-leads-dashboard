@@ -333,6 +333,22 @@ def reconcile_sheet(raw, existing):
             raise ReportError("Há criativo/plataforma duplicado no mês de validação.")
         sheet_index[key] = row
 
+    meta_keys = []
+    for meta_row in raw["rows"]:
+        platform = PLATFORMS.get(meta_row.get("publisher_platform"))
+        creative = raw["ads"].get(str(meta_row.get("ad_id")), {}).get("creative", {})
+        meta_keys.append((platform, normalized_url(creative.get("instagram_permalink_url"))))
+    unmatched = sum(1 for key in meta_keys if key not in sheet_index)
+    duplicates = len(meta_keys) - len(set(meta_keys))
+    if unmatched or duplicates or len(set(meta_keys)) != len(sheet_index):
+        overlap = len(set(meta_keys) & set(sheet_index))
+        raise ReportError(
+            "Pareamento incompleto entre Meta e planilha "
+            f"(Meta: {len(meta_keys)}; planilha: {len(sheet_index)}; "
+            f"correspondentes: {overlap}; sem correspondência: {unmatched}; "
+            f"repetidos na Meta: {duplicates})."
+        )
+
     used = set()
     classifications = {}
     result_sets = defaultdict(list)
@@ -341,8 +357,6 @@ def reconcile_sheet(raw, existing):
         platform = PLATFORMS.get(meta_row.get("publisher_platform"))
         creative = raw["ads"].get(str(meta_row.get("ad_id")), {}).get("creative", {})
         key = (platform, normalized_url(creative.get("instagram_permalink_url")))
-        if not platform or key not in sheet_index or key in used:
-            raise ReportError("Não foi possível relacionar cada anúncio a uma linha da planilha.")
         used.add(key)
         sheet_row = sheet_index[key]
         _assert_close("investimento", numeric(meta_row["spend"]), sheet_number(sheet_row[5]), Decimal("0.02"))
