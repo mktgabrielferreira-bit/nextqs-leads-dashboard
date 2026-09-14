@@ -51,6 +51,15 @@ class MetricsTests(unittest.TestCase):
             "profile_visit[igual=1,menor=0,maior=0,ausente=2]",
         ])
 
+    def test_safe_action_diagnostic_treats_missing_as_zero(self):
+        self.assertEqual(
+            _action_relation_counts([
+                ({"actions": [{"action_type": "lead", "value": "1"}]}, 1),
+                ({"actions": []}, 0),
+            ]),
+            ["lead[igual=2,menor=0,maior=0,ausente=0]"],
+        )
+
     def test_uses_link_clicks_and_one_selected_event(self):
         raw, mapping = fixture()
         raw["rows"][0]["clicks"] = "200"
@@ -167,6 +176,25 @@ class SheetTests(unittest.TestCase):
         result = reconcile_sheet(raw, [HEADERS[:], row])
         self.assertEqual(result["matched_by_url"], 0)
         self.assertEqual(result["matched_by_metrics"], 1)
+
+    def test_reconciles_duplicate_permalink_by_unique_base_metrics(self):
+        raw, _ = fixture()
+        second = copy.deepcopy(raw["rows"][0])
+        second.update(ad_id="3", adset_id="4", spend="50", reach="400",
+                      impressions="500", inline_link_clicks="10")
+        raw["rows"].append(second)
+        raw["totals"][0]["spend"] = "150"
+        raw["ads"]["3"] = copy.deepcopy(raw["ads"]["1"])
+        raw["adsets"]["4"] = copy.deepcopy(raw["adsets"]["2"])
+        first_sheet = ["2024-02", "Instagram", "Whatsapp", "Conversas",
+                       "https://www.instagram.com/p/same", 100, 800, 1000, 5, 20,
+                       20, .02, 100, 3, 0, 0]
+        second_sheet = ["2024-02", "Instagram", "Whatsapp", "Conversas",
+                        "https://www.instagram.com/p/same", 50, 400, 500, 5, 10,
+                        10, .02, 100, 3, 0, 0]
+        result = reconcile_sheet(raw, [HEADERS[:], first_sheet, second_sheet])
+        self.assertEqual(result["matched_rows"], 2)
+        self.assertEqual(result["matched_by_metrics"], 2)
 
 
 class PaginationTests(unittest.TestCase):

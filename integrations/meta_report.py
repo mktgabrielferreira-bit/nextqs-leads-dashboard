@@ -339,7 +339,7 @@ def _action_relation_counts(rows):
                 if action.get("action_type") == action_type
             ]
             if not entries:
-                counts["ausente"] += 1
+                counts["igual" if expected == 0 else "ausente"] += 1
                 continue
             if len(entries) > 1:
                 raise ReportError("Evento duplicado na resposta; diagnóstico interrompido.")
@@ -357,12 +357,10 @@ def reconcile_sheet(raw, existing):
     month_rows = [(row + [""] * 16)[:16] for row in existing[1:] if row and sheet_month(row[0]) == raw["month"]]
     if not month_rows:
         raise ReportError("O mês de validação não existe na planilha.")
-    sheet_index = {}
-    for row in month_rows:
-        key = (str(row[1]), normalized_url(row[4]))
-        if key in sheet_index:
-            raise ReportError("Há criativo/plataforma duplicado no mês de validação.")
-        sheet_index[key] = row
+    sheet_rows = [
+        {"platform": str(row[1]), "url": normalized_url(row[4]), "row": row}
+        for row in month_rows
+    ]
 
     used = set()
     matched_by_url = 0
@@ -376,15 +374,21 @@ def reconcile_sheet(raw, existing):
     for meta_row in raw["rows"]:
         platform = PLATFORMS.get(meta_row.get("publisher_platform"))
         creative = raw["ads"].get(str(meta_row.get("ad_id")), {}).get("creative", {})
-        key = (platform, normalized_url(creative.get("instagram_permalink_url")))
-        sheet_key = key if key in sheet_index and key not in used else None
-        if sheet_key is not None:
+        meta_url = normalized_url(creative.get("instagram_permalink_url"))
+        url_candidates = [
+            index for index, candidate in enumerate(sheet_rows)
+            if index not in used and candidate["platform"] == platform
+            and candidate["url"] == meta_url
+        ]
+        sheet_index = url_candidates[0] if len(url_candidates) == 1 else None
+        if sheet_index is not None:
             matched_by_url += 1
         else:
             candidates = []
-            for candidate_key, candidate_row in sheet_index.items():
-                if candidate_key in used or candidate_key[0] != platform:
+            for candidate_index, candidate in enumerate(sheet_rows):
+                if candidate_index in used or candidate["platform"] != platform:
                     continue
+                candidate_row = candidate["row"]
                 same_counts = (
                     numeric(meta_row["reach"]) == sheet_number(candidate_row[6])
                     and numeric(meta_row["impressions"]) == sheet_number(candidate_row[7])
@@ -392,17 +396,17 @@ def reconcile_sheet(raw, existing):
                 )
                 same_spend = abs(numeric(meta_row["spend"]) - sheet_number(candidate_row[5])) <= Decimal("0.02")
                 if same_counts and same_spend:
-                    candidates.append(candidate_key)
+                    candidates.append(candidate_index)
             if len(candidates) != 1:
                 raise ReportError(
                     "Pareamento incompleto entre Meta e planilha "
-                    f"(Meta: {len(raw['rows'])}; planilha: {len(sheet_index)}; "
+                    f"(Meta: {len(raw['rows'])}; planilha: {len(sheet_rows)}; "
                     f"por URL: {matched_by_url}; por métricas: {matched_by_metrics})."
                 )
-            sheet_key = candidates[0]
+            sheet_index = candidates[0]
             matched_by_metrics += 1
-        used.add(sheet_key)
-        sheet_row = sheet_index[sheet_key]
+        used.add(sheet_index)
+        sheet_row = sheet_rows[sheet_index]["row"]
         _assert_close("investimento", numeric(meta_row["spend"]), sheet_number(sheet_row[5]), Decimal("0.02"))
         _assert_close("alcance", numeric(meta_row["reach"]), sheet_number(sheet_row[6]))
         _assert_close("impressões", numeric(meta_row["impressions"]), sheet_number(sheet_row[7]))
@@ -443,7 +447,7 @@ def reconcile_sheet(raw, existing):
         if visit_candidates:
             visits_sets.append(visit_candidates)
 
-    if used != set(sheet_index):
+    if used != set(range(len(sheet_rows))):
         raise ReportError("Existem linhas na planilha sem anúncio correspondente na Meta.")
     total_sheet_spend = sum((sheet_number(row[5]) for row in month_rows), Decimal(0))
     total_meta_spend = sum((numeric(row["spend"]) for row in raw["totals"]), Decimal(0))
