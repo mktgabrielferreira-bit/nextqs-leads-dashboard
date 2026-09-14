@@ -88,6 +88,7 @@ Se a Meta retornar uma combinação diferente ou ambígua, o workflow falha sem 
 - primeira escrita real de agosto de 2026 concluída e verificada;
 - nenhuma alteração nos links curados nem nas colunas O:P;
 - segunda escrita do mesmo mês com zero alterações, confirmando idempotência.
+- dashboard autenticado validado na seção Meta Ads com o filtro Agosto/2026, sem aviso de dados vazios ou erro de carregamento.
 
 ## Custo e disponibilidade
 
