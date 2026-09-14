@@ -9,6 +9,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -319,6 +320,22 @@ def _candidate_metrics(row, expected):
     return candidates
 
 
+def _name_tags(*values):
+    text = " ".join(str(value or "") for value in values).lower()
+    text = "".join(
+        char for char in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(char)
+    )
+    patterns = {
+        "whatsapp": r"\b(?:whats(?:app)?|wpp)\b",
+        "site": r"\b(?:site|website)\b",
+        "instagram": r"\b(?:instagram|insta|perfil)\b",
+        "formulario": r"\b(?:formulario|instant form|lead form)\b",
+        "conversas": r"\b(?:conversa|conversas|mensagem|mensagens)\b",
+    }
+    return tuple(sorted(tag for tag, pattern in patterns.items() if re.search(pattern, text)))
+
+
 def _action_relation_counts(rows):
     """Describe candidate actions without exposing report values."""
     relevant = ("lead", "messag", "conversation", "profile", "contact")
@@ -427,6 +444,7 @@ def reconcile_sheet(raw, existing):
             str(adset.get("optimization_goal", "")),
             promoted_fields,
             str(adset.get("promoted_object", {}).get("custom_event_type", "")),
+            _name_tags(meta_row.get("campaign_name"), meta_row.get("adset_name")),
         )
         previous = classifications.setdefault(classification_key, objective)
         if previous != objective:
@@ -436,6 +454,7 @@ def reconcile_sheet(raw, existing):
                 f"optimization_goal={classification_key[1]}, "
                 f"promoted_object_fields={','.join(classification_key[2]) or 'nenhum'}: "
                 f"custom_event_type={classification_key[3] or 'nenhum'}: "
+                f"name_tags={','.join(classification_key[4]) or 'nenhuma'}: "
                 + ",".join(sorted((previous, objective)))
             )
 
@@ -493,7 +512,8 @@ def reconcile_sheet(raw, existing):
         "classification_rules": [
             {"destination_type": key[0], "optimization_goal": key[1],
              "promoted_object_fields": list(key[2]),
-             "custom_event_type": key[3], "objetivo": value}
+             "custom_event_type": key[3], "name_tags": list(key[4]),
+             "objetivo": value}
             for key, value in sorted(classifications.items())
         ],
         "result_metric_candidates": result_candidates,

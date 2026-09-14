@@ -3,7 +3,7 @@ import unittest
 from datetime import date
 from integrations.meta_report import (
     ACCOUNT_ID, HEADERS, MetaClient, ReportError, action_value,
-    _action_relation_counts, month_bounds, numeric, plan_updates, reconcile_sheet,
+    _action_relation_counts, _name_tags, month_bounds, numeric, plan_updates, reconcile_sheet,
     report_rows, sheet_month,
 )
 
@@ -39,6 +39,11 @@ class PeriodTests(unittest.TestCase):
 
 
 class MetricsTests(unittest.TestCase):
+    def test_extracts_only_allowed_name_tags(self):
+        self.assertEqual(_name_tags("LEADS | WhatsApp", "Perfil Instagram"),
+                         ("instagram", "whatsapp"))
+        self.assertEqual(_name_tags("Cliente confidencial"), ())
+
     def test_safe_action_diagnostic_reports_only_relations(self):
         rows = [
             ({"actions": [{"action_type": "lead", "value": "2"}]}, 3),
@@ -157,6 +162,7 @@ class SheetTests(unittest.TestCase):
             "destination_type": "WHATSAPP", "optimization_goal": "CONVERSATIONS",
             "promoted_object_fields": [],
             "custom_event_type": "",
+            "name_tags": [],
             "objetivo": "Conversas"}])
         self.assertEqual(result["result_metric_candidates"]["Conversas"],
                          ["action:chosen_event", "action:overlapping_event"])
