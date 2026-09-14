@@ -7,6 +7,14 @@ on:
         description: 'Mês encerrado (YYYY-MM); vazio usa o mês anterior'
         required: false
         type: string
+      mode:
+        description: 'Modo de execução'
+        required: true
+        default: validate
+        type: choice
+        options:
+          - validate
+          - backfill_ids
 
 # Ativar somente depois da reconciliação com o Gerenciador e teste da escrita:
 #  schedule:
@@ -43,10 +51,16 @@ jobs:
           GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
           META_API_VERSION: v26.0
           REPORT_MONTH: ${{ inputs.month }}
+          REPORT_MODE: ${{ inputs.mode }}
         shell: bash
         run: |
-          args=(--output "$RUNNER_TEMP/nextqs-meta" --check-sheet)
+          args=(--output "$RUNNER_TEMP/nextqs-meta")
           if [ -n "$REPORT_MONTH" ]; then args+=(--month "$REPORT_MONTH"); fi
+          if [ "$REPORT_MODE" = "backfill_ids" ]; then
+            args+=(--backfill-ids)
+          else
+            args+=(--check-sheet)
+          fi
           python integrations/meta_report.py "${args[@]}"
       - name: Remover dados temporários do runner
         if: always()

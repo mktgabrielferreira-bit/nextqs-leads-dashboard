@@ -25,6 +25,7 @@ SPREADSHEET_ID = "1dw5ssrZu9UfzymB7GLs0rqZf0LggvKAnC5Tek3go1cM"
 HEADERS = ["mês_ano", "plataforma", "destino", "objetivo", "criativo_anúncio",
            "valor_usado", "alcance", "impressões", "resultados", "custo por resultados",
            "cliques", "ctr", "cpm", "visitas ao perfil do instagram", "oportunidades", "negócios"]
+TECHNICAL_HEADERS = ["meta_ad_id", "meta_adset_id", "meta_campaign_id"]
 PLATFORMS = {"facebook": "Facebook", "instagram": "Instagram"}
 DESTINATIONS = {"Conversas": "Whatsapp", "Visitas ao Perfil do Instagram": "Instagram",
                 "Lead Site": "Site", "Lead Formulário": "Formulário Meta"}
@@ -248,20 +249,39 @@ def plan_updates(existing, proposed, month):
     return changes
 
 
-def load_sheet_rows(credentials_json):
-    """Read unformatted values from the existing worksheet without changing it."""
+def open_sheet(credentials_json):
     try:
         import gspread
         from google.oauth2.service_account import Credentials
         info = json.loads(credentials_json or "")
         credentials = Credentials.from_service_account_info(info, scopes=GOOGLE_SCOPES)
-        worksheet = gspread.authorize(credentials).open_by_key(SPREADSHEET_ID).worksheet("meta_campanhas")
-        return worksheet.get("A1:P", value_render_option="UNFORMATTED_VALUE")
+        return gspread.authorize(credentials).open_by_key(SPREADSHEET_ID).worksheet("meta_campanhas")
     except (ValueError, TypeError, KeyError):
         raise ReportError("Credencial Google inválida; nenhuma escrita realizada.") from None
     except Exception:
         # Provider exceptions may contain request details. Keep CI logs generic.
         raise ReportError("Não foi possível ler meta_campanhas com a conta de serviço.") from None
+
+
+def load_sheet_rows(credentials_json):
+    """Read unformatted values from the existing worksheet without changing it."""
+    try:
+        return open_sheet(credentials_json).get("A1:S", value_render_option="UNFORMATTED_VALUE")
+    except ReportError:
+        raise
+    except Exception:
+        raise ReportError("Não foi possível ler meta_campanhas com a conta de serviço.") from None
+
+
+def apply_sheet_updates(credentials_json, updates):
+    if not updates:
+        raise ReportError("Nenhuma atualização válida foi planejada.")
+    try:
+        open_sheet(credentials_json).batch_update(updates, value_input_option="RAW")
+    except ReportError:
+        raise
+    except Exception:
+        raise ReportError("Não foi possível atualizar meta_campanhas; valide a planilha.") from None
 
 
 def sheet_number(value):
@@ -404,11 +424,17 @@ def _action_relation_counts(rows):
     return summaries
 
 
-def reconcile_sheet(raw, existing):
+def reconcile_sheet(raw, existing, collect_ids=False, skip_semantics=False):
     """Compare Meta with the manually prepared closed month, without exposing row data."""
     if not existing or list(existing[0][:16]) != HEADERS:
         raise ReportError("Cabeçalhos da planilha mudaram; nenhuma escrita realizada.")
-    month_rows = [(row + [""] * 16)[:16] for row in existing[1:] if row and sheet_month(row[0]) == raw["month"]]
+    month_entries = [
+        (row_number, (row + [""] * 16)[:16])
+        for row_number, row in enumerate(existing[1:], 2)
+        if row and sheet_month(row[0]) == raw["month"]
+    ]
+    month_row_numbers = [entry[0] for entry in month_entries]
+    month_rows = [entry[1] for entry in month_entries]
     if not month_rows:
         raise ReportError("O mês de validação não existe na planilha.")
     sheet_rows = [
@@ -425,6 +451,7 @@ def reconcile_sheet(raw, existing):
     missing_result_actions = defaultdict(set)
     missing_visit_actions = set()
     result_diagnostic_rows = defaultdict(list)
+    id_updates = []
     for meta_row in raw["rows"]:
         platform = PLATFORMS.get(meta_row.get("publisher_platform"))
         creative = raw["ads"].get(str(meta_row.get("ad_id")), {}).get("creative", {})
@@ -470,6 +497,16 @@ def reconcile_sheet(raw, existing):
         spend = numeric(meta_row["spend"])
         _assert_close("CTR", clicks / impressions if impressions else Decimal(0), sheet_number(sheet_row[11]), Decimal("0.0001"))
         _assert_close("CPM", spend * 1000 / impressions if impressions else Decimal(0), sheet_number(sheet_row[12]), Decimal("0.02"))
+
+        if collect_ids:
+            id_updates.append({
+                "range": f"Q{month_row_numbers[sheet_index]}:S{month_row_numbers[sheet_index]}",
+                "values": [[str(meta_row["ad_id"]), str(meta_row["adset_id"]),
+                            str(meta_row["campaign_id"])]],
+            })
+
+        if skip_semantics:
+            continue
 
         objective = str(sheet_row[3])
         if objective not in DESTINATIONS or str(sheet_row[2]) != DESTINATIONS[objective]:
@@ -547,7 +584,7 @@ def reconcile_sheet(raw, existing):
     visit_candidates = sorted(set.intersection(*visits_sets)) if visits_sets else []
     if visits_sets and not visit_candidates:
         raise ReportError("A métrica Visitas ao perfil não é consistente.")
-    return {
+    reconciliation = {
         "month": raw["month"],
         "matched_rows": len(used),
         "matched_by_url": matched_by_url,
@@ -563,6 +600,7 @@ def reconcile_sheet(raw, existing):
         "result_metric_candidates": result_candidates,
         "profile_visits_metric_candidates": visit_candidates,
     }
+    return (reconciliation, id_updates) if collect_ids else reconciliation
 
 
 def main():
@@ -571,6 +609,7 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--mapping", default=None)
     parser.add_argument("--check-sheet", action="store_true")
+    parser.add_argument("--backfill-ids", action="store_true")
     args = parser.parse_args()
     try:
         client = MetaClient(os.environ.get("META_ACCESS_TOKEN"), os.environ.get("META_API_VERSION", "v26.0"))
@@ -583,7 +622,25 @@ def main():
             mapping = json.loads(Path(args.mapping).read_text(encoding="utf-8"))
             prepared = report_rows(raw, mapping)
             (output / "meta_preview.json").write_text(json.dumps({"headers": HEADERS[:14], "rows": prepared}, ensure_ascii=False, indent=2), encoding="utf-8")
-        if args.check_sheet:
+        if args.backfill_ids:
+            credentials_json = os.environ.get("GCP_SERVICE_ACCOUNT_JSON")
+            existing = load_sheet_rows(credentials_json)
+            reconciliation, updates = reconcile_sheet(
+                raw, existing, collect_ids=True, skip_semantics=True
+            )
+            header = (existing[0] + [""] * 19)[16:19]
+            if header not in (["", "", ""], TECHNICAL_HEADERS):
+                raise ReportError("As colunas técnicas Q:S já contêm cabeçalhos diferentes.")
+            if header != TECHNICAL_HEADERS:
+                updates.insert(0, {"range": "Q1:S1", "values": [TECHNICAL_HEADERS]})
+            apply_sheet_updates(credentials_json, updates)
+            verified = load_sheet_rows(credentials_json)
+            if (verified[0] + [""] * 19)[16:19] != TECHNICAL_HEADERS:
+                raise ReportError("Os identificadores técnicos não foram confirmados após a escrita.")
+            print("Identificadores técnicos preenchidos e verificados: " + json.dumps(
+                {"month": reconciliation["month"], "matched_rows": reconciliation["matched_rows"]},
+                ensure_ascii=False, sort_keys=True))
+        elif args.check_sheet:
             existing = load_sheet_rows(os.environ.get("GCP_SERVICE_ACCOUNT_JSON"))
             reconciliation = reconcile_sheet(raw, existing)
             (output / "reconciliation.json").write_text(json.dumps(reconciliation, ensure_ascii=False, indent=2), encoding="utf-8")

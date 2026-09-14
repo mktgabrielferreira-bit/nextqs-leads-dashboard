@@ -9,7 +9,7 @@ from integrations.meta_report import (
 
 
 def fixture():
-    row = dict(ad_id="1", adset_id="2", publisher_platform="instagram",
+    row = dict(ad_id="1", adset_id="2", campaign_id="9", publisher_platform="instagram",
                date_start="2024-02-01", date_stop="2024-02-29", spend="100",
                reach="800", impressions="1000", inline_link_clicks="20",
                actions=[{"action_type": "chosen_event", "value": "5"},
@@ -126,6 +126,19 @@ class MetricsTests(unittest.TestCase):
 
 
 class SheetTests(unittest.TestCase):
+    def test_plans_technical_ids_without_semantic_classification(self):
+        raw, _ = fixture()
+        row = ["2024-02", "Instagram", "Whatsapp", "Conversas",
+               "https://www.instagram.com/p/example", 100, 800, 1000, 5, 20,
+               20, .02, 100, 3, 7, 2]
+        result, updates = reconcile_sheet(
+            raw, [HEADERS[:], row], collect_ids=True, skip_semantics=True
+        )
+        self.assertEqual(result["matched_rows"], 1)
+        self.assertEqual(updates, [{
+            "range": "Q2:S2", "values": [["1", "2", "9"]]
+        }])
+
     def test_normalizes_google_date_serial(self):
         serial = (date(2026, 8, 1) - date(1899, 12, 30)).days
         self.assertEqual(sheet_month(serial), "2026-08")
