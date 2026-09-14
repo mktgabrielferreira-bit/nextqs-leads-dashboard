@@ -10,7 +10,7 @@ import os
 import re
 import time
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -273,6 +273,27 @@ def sheet_number(value):
     return numeric(text)
 
 
+def sheet_month(value):
+    """Normalize either a displayed YYYY-MM value or a Google Sheets date serial."""
+    if isinstance(value, bool) or value is None:
+        raise ReportError("Mês inválido na planilha.")
+    if isinstance(value, (int, float)):
+        try:
+            return (date(1899, 12, 30) + timedelta(days=int(value))).strftime("%Y-%m")
+        except (OverflowError, ValueError):
+            raise ReportError("Mês inválido na planilha.") from None
+    text = str(value).strip()
+    match = re.fullmatch(r"(\d{4}-\d{2})(?:-\d{2})?", text)
+    if match:
+        return match.group(1)
+    for pattern in ("%d/%m/%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(text, pattern).strftime("%Y-%m")
+        except ValueError:
+            pass
+    raise ReportError("Mês inválido na planilha.")
+
+
 def normalized_url(value):
     parsed = urlparse(str(value or "").strip())
     host = (parsed.hostname or "").lower()
@@ -302,7 +323,7 @@ def reconcile_sheet(raw, existing):
     """Compare Meta with the manually prepared closed month, without exposing row data."""
     if not existing or list(existing[0][:16]) != HEADERS:
         raise ReportError("Cabeçalhos da planilha mudaram; nenhuma escrita realizada.")
-    month_rows = [(row + [""] * 16)[:16] for row in existing[1:] if row and str(row[0]) == raw["month"]]
+    month_rows = [(row + [""] * 16)[:16] for row in existing[1:] if row and sheet_month(row[0]) == raw["month"]]
     if not month_rows:
         raise ReportError("O mês de validação não existe na planilha.")
     sheet_index = {}

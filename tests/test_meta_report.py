@@ -3,7 +3,7 @@ import unittest
 from datetime import date
 from integrations.meta_report import (
     ACCOUNT_ID, HEADERS, MetaClient, ReportError, action_value,
-    month_bounds, numeric, plan_updates, reconcile_sheet, report_rows,
+    month_bounds, numeric, plan_updates, reconcile_sheet, report_rows, sheet_month,
 )
 
 
@@ -87,6 +87,11 @@ class MetricsTests(unittest.TestCase):
 
 
 class SheetTests(unittest.TestCase):
+    def test_normalizes_google_date_serial(self):
+        serial = (date(2026, 8, 1) - date(1899, 12, 30)).days
+        self.assertEqual(sheet_month(serial), "2026-08")
+        self.assertEqual(sheet_month("2026-08-01"), "2026-08")
+
     def test_reexecution_preserves_manual_columns_and_other_month(self):
         raw, mapping = fixture()
         proposal = report_rows(raw, mapping)
