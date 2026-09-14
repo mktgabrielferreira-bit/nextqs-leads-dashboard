@@ -333,23 +333,9 @@ def reconcile_sheet(raw, existing):
             raise ReportError("Há criativo/plataforma duplicado no mês de validação.")
         sheet_index[key] = row
 
-    meta_keys = []
-    for meta_row in raw["rows"]:
-        platform = PLATFORMS.get(meta_row.get("publisher_platform"))
-        creative = raw["ads"].get(str(meta_row.get("ad_id")), {}).get("creative", {})
-        meta_keys.append((platform, normalized_url(creative.get("instagram_permalink_url"))))
-    unmatched = sum(1 for key in meta_keys if key not in sheet_index)
-    duplicates = len(meta_keys) - len(set(meta_keys))
-    if unmatched or duplicates or len(set(meta_keys)) != len(sheet_index):
-        overlap = len(set(meta_keys) & set(sheet_index))
-        raise ReportError(
-            "Pareamento incompleto entre Meta e planilha "
-            f"(Meta: {len(meta_keys)}; planilha: {len(sheet_index)}; "
-            f"correspondentes: {overlap}; sem correspondência: {unmatched}; "
-            f"repetidos na Meta: {duplicates})."
-        )
-
     used = set()
+    matched_by_url = 0
+    matched_by_metrics = 0
     classifications = {}
     result_sets = defaultdict(list)
     visits_sets = []
@@ -357,8 +343,32 @@ def reconcile_sheet(raw, existing):
         platform = PLATFORMS.get(meta_row.get("publisher_platform"))
         creative = raw["ads"].get(str(meta_row.get("ad_id")), {}).get("creative", {})
         key = (platform, normalized_url(creative.get("instagram_permalink_url")))
-        used.add(key)
-        sheet_row = sheet_index[key]
+        sheet_key = key if key in sheet_index and key not in used else None
+        if sheet_key is not None:
+            matched_by_url += 1
+        else:
+            candidates = []
+            for candidate_key, candidate_row in sheet_index.items():
+                if candidate_key in used or candidate_key[0] != platform:
+                    continue
+                same_counts = (
+                    numeric(meta_row["reach"]) == sheet_number(candidate_row[6])
+                    and numeric(meta_row["impressions"]) == sheet_number(candidate_row[7])
+                    and numeric(meta_row.get("inline_link_clicks", 0)) == sheet_number(candidate_row[10])
+                )
+                same_spend = abs(numeric(meta_row["spend"]) - sheet_number(candidate_row[5])) <= Decimal("0.02")
+                if same_counts and same_spend:
+                    candidates.append(candidate_key)
+            if len(candidates) != 1:
+                raise ReportError(
+                    "Pareamento incompleto entre Meta e planilha "
+                    f"(Meta: {len(raw['rows'])}; planilha: {len(sheet_index)}; "
+                    f"por URL: {matched_by_url}; por métricas: {matched_by_metrics})."
+                )
+            sheet_key = candidates[0]
+            matched_by_metrics += 1
+        used.add(sheet_key)
+        sheet_row = sheet_index[sheet_key]
         _assert_close("investimento", numeric(meta_row["spend"]), sheet_number(sheet_row[5]), Decimal("0.02"))
         _assert_close("alcance", numeric(meta_row["reach"]), sheet_number(sheet_row[6]))
         _assert_close("impressões", numeric(meta_row["impressions"]), sheet_number(sheet_row[7]))
@@ -409,6 +419,8 @@ def reconcile_sheet(raw, existing):
     return {
         "month": raw["month"],
         "matched_rows": len(used),
+        "matched_by_url": matched_by_url,
+        "matched_by_metrics": matched_by_metrics,
         "classification_rules": [
             {"destination_type": key[0], "optimization_goal": key[1], "objetivo": value}
             for key, value in sorted(classifications.items())

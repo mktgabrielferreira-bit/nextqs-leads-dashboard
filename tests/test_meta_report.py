@@ -129,6 +129,8 @@ class SheetTests(unittest.TestCase):
                20, .02, 100, 3, 0, 0]
         result = reconcile_sheet(raw, [HEADERS[:], row])
         self.assertEqual(result["matched_rows"], 1)
+        self.assertEqual(result["matched_by_url"], 1)
+        self.assertEqual(result["matched_by_metrics"], 0)
         self.assertEqual(result["classification_rules"], [{
             "destination_type": "WHATSAPP", "optimization_goal": "CONVERSATIONS",
             "objetivo": "Conversas"}])
@@ -143,6 +145,15 @@ class SheetTests(unittest.TestCase):
                20, .02, 100, 3, 0, 0]
         with self.assertRaises(ReportError):
             reconcile_sheet(raw, [HEADERS[:], row])
+
+    def test_reconciles_different_permalink_by_unique_base_metrics(self):
+        raw, _ = fixture()
+        row = ["2024-02", "Instagram", "Whatsapp", "Conversas",
+               "https://www.instagram.com/reel/different", 100, 800, 1000, 5, 20,
+               20, .02, 100, 3, 0, 0]
+        result = reconcile_sheet(raw, [HEADERS[:], row])
+        self.assertEqual(result["matched_by_url"], 0)
+        self.assertEqual(result["matched_by_metrics"], 1)
 
 
 class PaginationTests(unittest.TestCase):
