@@ -3,7 +3,8 @@ import unittest
 from datetime import date
 from integrations.meta_report import (
     ACCOUNT_ID, HEADERS, MetaClient, ReportError, action_value,
-    month_bounds, numeric, plan_updates, reconcile_sheet, report_rows, sheet_month,
+    _action_relation_counts, month_bounds, numeric, plan_updates, reconcile_sheet,
+    report_rows, sheet_month,
 )
 
 
@@ -38,6 +39,18 @@ class PeriodTests(unittest.TestCase):
 
 
 class MetricsTests(unittest.TestCase):
+    def test_safe_action_diagnostic_reports_only_relations(self):
+        rows = [
+            ({"actions": [{"action_type": "lead", "value": "2"}]}, 3),
+            ({"actions": [{"action_type": "lead", "value": "4"},
+                          {"action_type": "profile_visit", "value": "3"}]}, 3),
+            ({"actions": []}, 3),
+        ]
+        self.assertEqual(_action_relation_counts(rows), [
+            "lead[igual=0,menor=1,maior=1,ausente=1]",
+            "profile_visit[igual=1,menor=0,maior=0,ausente=2]",
+        ])
+
     def test_uses_link_clicks_and_one_selected_event(self):
         raw, mapping = fixture()
         raw["rows"][0]["clicks"] = "200"

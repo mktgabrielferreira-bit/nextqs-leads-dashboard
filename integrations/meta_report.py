@@ -319,6 +319,37 @@ def _candidate_metrics(row, expected):
     return candidates
 
 
+def _action_relation_counts(rows):
+    """Describe candidate actions without exposing report values."""
+    relevant = ("lead", "messag", "conversation", "profile", "contact")
+    action_types = sorted({
+        action.get("action_type", "")
+        for row, _ in rows
+        for action in row.get("actions", [])
+        if action.get("action_type") and any(
+            term in action.get("action_type", "").lower() for term in relevant
+        )
+    })
+    summaries = []
+    for action_type in action_types:
+        counts = {"igual": 0, "menor": 0, "maior": 0, "ausente": 0}
+        for row, expected in rows:
+            entries = [
+                action for action in row.get("actions", [])
+                if action.get("action_type") == action_type
+            ]
+            if not entries:
+                counts["ausente"] += 1
+                continue
+            if len(entries) > 1:
+                raise ReportError("Evento duplicado na resposta; diagnóstico interrompido.")
+            actual = numeric(entries[0].get("value"))
+            counts["igual" if actual == expected else "menor" if actual < expected else "maior"] += 1
+        signature = ",".join(f"{label}={counts[label]}" for label in ("igual", "menor", "maior", "ausente"))
+        summaries.append(action_type + "[" + signature + "]")
+    return summaries
+
+
 def reconcile_sheet(raw, existing):
     """Compare Meta with the manually prepared closed month, without exposing row data."""
     if not existing or list(existing[0][:16]) != HEADERS:
@@ -341,6 +372,7 @@ def reconcile_sheet(raw, existing):
     visits_sets = []
     missing_result_actions = defaultdict(set)
     missing_visit_actions = set()
+    result_diagnostic_rows = defaultdict(list)
     for meta_row in raw["rows"]:
         platform = PLATFORMS.get(meta_row.get("publisher_platform"))
         creative = raw["ads"].get(str(meta_row.get("ad_id")), {}).get("creative", {})
@@ -391,6 +423,7 @@ def reconcile_sheet(raw, existing):
             raise ReportError("A classificação automática de objetivo ficou ambígua.")
 
         expected_result = sheet_number(sheet_row[8])
+        result_diagnostic_rows[objective].append((meta_row, expected_result))
         candidates = _candidate_metrics(meta_row, expected_result)
         if expected_result and not candidates:
             missing_result_actions[objective].update(
@@ -418,10 +451,10 @@ def reconcile_sheet(raw, existing):
 
     if missing_result_actions:
         summary = "; ".join(
-            objective + ": " + ",".join(sorted(filter(None, actions)))
-            for objective, actions in sorted(missing_result_actions.items())
+            objective + ": " + ";".join(_action_relation_counts(result_diagnostic_rows[objective]))
+            for objective in sorted(missing_result_actions)
         )
-        raise ReportError("Resultados sem correspondência exata. Ações relevantes: " + summary)
+        raise ReportError("Resultados sem correspondência exata. Relações seguras: " + summary)
     if missing_visit_actions:
         raise ReportError("Visitas sem correspondência exata. Ações relevantes: " +
                           ",".join(sorted(filter(None, missing_visit_actions))))
