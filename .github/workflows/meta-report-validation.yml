@@ -15,6 +15,7 @@ on:
         options:
           - validate
           - backfill_ids
+          - write
 
 # Ativar somente depois da reconciliação com o Gerenciador e teste da escrita:
 #  schedule:
@@ -58,6 +59,8 @@ jobs:
           if [ -n "$REPORT_MONTH" ]; then args+=(--month "$REPORT_MONTH"); fi
           if [ "$REPORT_MODE" = "backfill_ids" ]; then
             args+=(--backfill-ids)
+          elif [ "$REPORT_MODE" = "write" ]; then
+            args+=(--write-sheet)
           else
             args+=(--check-sheet)
           fi

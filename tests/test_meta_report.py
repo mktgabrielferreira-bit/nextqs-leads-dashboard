@@ -2,9 +2,10 @@ import copy
 import unittest
 from datetime import date
 from integrations.meta_report import (
-    ACCOUNT_ID, HEADERS, MetaClient, ReportError, action_value,
+    ACCOUNT_ID, HEADERS, TECHNICAL_HEADERS, MetaClient, ReportError, action_value,
     _action_relation_counts, _creative_signature, _name_tags, month_bounds, numeric,
-    plan_updates, reconcile_sheet, report_rows, sheet_month,
+    build_mapping, metric, plan_month_updates, plan_updates, reconcile_sheet,
+    report_rows, sheet_month, verify_month_write,
 )
 
 
@@ -94,6 +95,12 @@ class MetricsTests(unittest.TestCase):
         with self.assertRaises(ReportError):
             report_rows(raw, mapping)
 
+    def test_known_sparse_profile_field_may_be_zero(self):
+        self.assertEqual(metric({}, {"field": "instagram_profile_visits",
+                                     "missing_is_zero": True}), 0)
+        with self.assertRaises(ReportError):
+            metric({}, {"field": "other", "missing_is_zero": True})
+
     def test_unknown_mapping_and_platform_block(self):
         raw, mapping = fixture()
         with self.assertRaises(ReportError):
@@ -126,6 +133,42 @@ class MetricsTests(unittest.TestCase):
 
 
 class SheetTests(unittest.TestCase):
+    def test_builds_mapping_from_stable_ad_history(self):
+        raw, _ = fixture()
+        raw["adsets"]["2"] = {"destination_type": "UNDEFINED",
+                                  "optimization_goal": "OFFSITE_CONVERSIONS"}
+        historical = ["2024-02", "Instagram", "Whatsapp", "Conversas",
+                      "https://www.instagram.com/p/example", 100, 800, 1000,
+                      5, 20, 20, .02, 100, 3, 0, 0, "1", "2", "9"]
+        mapping = build_mapping(raw, [HEADERS + TECHNICAL_HEADERS, historical])
+        self.assertEqual(mapping["ads"]["1"]["objetivo"], "Conversas")
+
+    def test_builds_mapping_for_new_unambiguous_ad(self):
+        raw, _ = fixture()
+        raw["adsets"]["2"] = {"destination_type": "ON_AD",
+                                  "optimization_goal": "LEAD_GENERATION"}
+        mapping = build_mapping(raw, [HEADERS + TECHNICAL_HEADERS])
+        self.assertEqual(mapping["ads"]["1"]["objetivo"], "Lead Formulário")
+
+    def test_plans_month_write_preserving_permalink_and_manual_columns(self):
+        existing_row = ["2024-02", "Instagram", "Whatsapp", "Conversas",
+                        "https://www.instagram.com/p/manual", 100, 800, 1000,
+                        5, 20, 20, .02, 100, 3, 7, 2, "1", "2", "9"]
+        record = {"values": ["2024-02", "Instagram", "Whatsapp", "Conversas",
+                             "https://www.instagram.com/p/api", 100, 800, 1000,
+                             6, 100 / 6, 20, .02, 100, 3],
+                  "meta_ad_id": "1", "meta_adset_id": "2", "meta_campaign_id": "9"}
+        before = [HEADERS + TECHNICAL_HEADERS, existing_row]
+        updates, expected = plan_month_updates(before, [record], "2024-02")
+        self.assertEqual([update["range"] for update in updates], ["A2:N2", "Q2:S2"])
+        self.assertEqual(expected[0]["values"][4], existing_row[4])
+        after_row = expected[0]["values"] + existing_row[14:16] + expected[0]["ids"]
+        verify_month_write(before, [before[0], after_row], expected)
+        changed_manual = copy.deepcopy(after_row)
+        changed_manual[14] = 99
+        with self.assertRaises(ReportError):
+            verify_month_write(before, [before[0], changed_manual], expected)
+
     def test_plans_technical_ids_without_semantic_classification(self):
         raw, _ = fixture()
         row = ["2024-02", "Instagram", "Whatsapp", "Conversas",

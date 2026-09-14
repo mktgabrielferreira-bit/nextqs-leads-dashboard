@@ -26,6 +26,15 @@ HEADERS = ["mês_ano", "plataforma", "destino", "objetivo", "criativo_anúncio",
            "valor_usado", "alcance", "impressões", "resultados", "custo por resultados",
            "cliques", "ctr", "cpm", "visitas ao perfil do instagram", "oportunidades", "negócios"]
 TECHNICAL_HEADERS = ["meta_ad_id", "meta_adset_id", "meta_campaign_id"]
+RESULT_METRICS = {
+    "Conversas": {"action_type": "onsite_conversion.messaging_conversation_started_7d"},
+    "Lead Site": {"action_type": "offsite_conversion.fb_pixel_lead"},
+    "Lead Formulário": {"action_type": "onsite_conversion.lead_grouped"},
+    "Visitas ao Perfil do Instagram": {
+        "field": "instagram_profile_visits", "missing_is_zero": True
+    },
+}
+PROFILE_VISITS_METRIC = {"field": "instagram_profile_visits", "missing_is_zero": True}
 PLATFORMS = {"facebook": "Facebook", "instagram": "Instagram"}
 DESTINATIONS = {"Conversas": "Whatsapp", "Visitas ao Perfil do Instagram": "Instagram",
                 "Lead Site": "Site", "Lead Formulário": "Formulário Meta"}
@@ -166,16 +175,21 @@ def action_value(row, action_type):
 
 
 def metric(row, spec):
-    if not isinstance(spec, dict) or set(spec) not in ({"field"}, {"action_type"}):
+    allowed = ({"field"}, {"action_type"}, {"field", "missing_is_zero"})
+    if not isinstance(spec, dict) or set(spec) not in allowed:
         raise ReportError("Mapeamento de métrica não validado.")
     if "action_type" in spec:
         return action_value(row, spec["action_type"])
+    if spec["field"] not in row and spec.get("missing_is_zero") is True:
+        if spec["field"] != "instagram_profile_visits":
+            raise ReportError("Campo opcional não permitido no mapeamento.")
+        return Decimal(0)
     if spec["field"] not in row:
         raise ReportError("Campo de métrica ausente; não substituir por zero.")
     return numeric(row[spec["field"]])
 
 
-def report_rows(raw, mapping):
+def report_rows(raw, mapping, include_ids=False):
     """Require a verified mapping per ad set/ad. Never guess what Results means."""
     if raw.get("account", {}).get("account_id") != ACCOUNT_ID:
         raise ReportError("Relatório de outra conta.")
@@ -186,7 +200,7 @@ def report_rows(raw, mapping):
     actual = sum((numeric(r["spend"]) for r in rows), Decimal(0))
     if abs(expected - actual) > Decimal("0.02"):
         raise ReportError("Investimento por anúncio não confere com o total da conta.")
-    output = []
+    records = []
     keys = set()
     for row in rows:
         if row.get("date_start", "")[:7] != raw["month"] or row.get("date_stop", "")[:7] != raw["month"]:
@@ -214,12 +228,59 @@ def report_rows(raw, mapping):
                   float(spend / result) if result else 0, float(clicks),
                   float(clicks / impressions) if impressions else 0,
                   float(spend * 1000 / impressions) if impressions else 0, float(visits)]
-        key = tuple(values[:5])
+        key = (str(row["ad_id"]), platform)
         if key in keys:
-            raise ReportError("Vários anúncios compartilham a mesma linha; validar alcance antes de consolidar.")
+            raise ReportError("Anúncio/plataforma duplicado na resposta; relatório descartado.")
         keys.add(key)
-        output.append(values)
-    return sorted(output, key=lambda r: tuple(r[:5]))
+        records.append({
+            "values": values,
+            "meta_ad_id": str(row["ad_id"]),
+            "meta_adset_id": str(row["adset_id"]),
+            "meta_campaign_id": str(row["campaign_id"]),
+        })
+    records.sort(key=lambda record: tuple(record["values"][:5]) +
+                 (record["meta_ad_id"],))
+    return records if include_ids else [record["values"] for record in records]
+
+
+def build_mapping(raw, existing):
+    """Use the validated per-ad history, then safe Meta-native rules for new ads."""
+    known_ads = {}
+    if not existing or list(existing[0][:16]) != HEADERS:
+        raise ReportError("Cabeçalhos da planilha mudaram; nenhuma escrita permitida.")
+    for row in existing[1:]:
+        padded = (row + [""] * 19)[:19]
+        ad_id, objective = str(padded[16]).strip(), str(padded[3]).strip()
+        if not ad_id:
+            continue
+        if objective not in DESTINATIONS:
+            raise ReportError("Objetivo histórico inválido para um identificador Meta.")
+        previous = known_ads.setdefault(ad_id, objective)
+        if previous != objective:
+            raise ReportError("Um anúncio Meta possui classificações históricas conflitantes.")
+
+    mapping = {"ads": {}}
+    for meta_row in raw["rows"]:
+        ad_id = str(meta_row["ad_id"])
+        objective = known_ads.get(ad_id)
+        if objective is None:
+            adset = raw["adsets"].get(str(meta_row["adset_id"]), {})
+            signature = (str(adset.get("destination_type", "")),
+                         str(adset.get("optimization_goal", "")))
+            objective = {
+                ("WHATSAPP", "CONVERSATIONS"): "Conversas",
+                ("INSTAGRAM_PROFILE", "VISIT_INSTAGRAM_PROFILE"): "Visitas ao Perfil do Instagram",
+                ("ON_AD", "LEAD_GENERATION"): "Lead Formulário",
+            }.get(signature)
+        if objective is None:
+            raise ReportError("Anúncio novo com objetivo ambíguo; classifique-o antes da escrita.")
+        mapping["ads"][ad_id] = {
+            "validated": True,
+            "objetivo": objective,
+            "result_metric": RESULT_METRICS[objective],
+            "profile_visits_metric": PROFILE_VISITS_METRIC,
+        }
+    return mapping
 
 
 def plan_updates(existing, proposed, month):
@@ -247,6 +308,82 @@ def plan_updates(existing, proposed, month):
             index = last
         changes.append({"range": f"A{index}:N{index}", "values": [row]})
     return changes
+
+
+def plan_month_updates(existing, records, month):
+    """Plan idempotent writes to A:N and Q:S while preserving E and O:P."""
+    if not existing or list(existing[0][:16]) != HEADERS:
+        raise ReportError("Cabeçalhos da planilha mudaram; nenhuma escrita permitida.")
+    technical = (existing[0] + [""] * 19)[16:19]
+    if technical != TECHNICAL_HEADERS:
+        raise ReportError("Os identificadores técnicos precisam ser preenchidos antes da escrita.")
+    if not records:
+        raise ReportError("Relatório proposto vazio; nenhuma escrita realizada.")
+
+    lookup = {}
+    for row_number, row in enumerate(existing[1:], 2):
+        padded = (row + [""] * 19)[:19]
+        if not padded[0] or sheet_month(padded[0]) != month:
+            continue
+        key = (str(padded[1]), str(padded[16]).strip())
+        if not key[1]:
+            raise ReportError("O mês existente possui linha sem meta_ad_id.")
+        if key in lookup:
+            raise ReportError("O mês existente possui anúncio/plataforma duplicado.")
+        lookup[key] = {"row_number": row_number, "values": padded}
+
+    incoming = {}
+    for record in records:
+        values = list(record.get("values", []))
+        if len(values) != 14 or values[0] != month:
+            raise ReportError("Linha proposta inválida ou de outro mês.")
+        key = (str(values[1]), str(record.get("meta_ad_id", "")).strip())
+        if not key[1] or key in incoming:
+            raise ReportError("Relatório proposto possui identificador ausente ou duplicado.")
+        incoming[key] = record
+    if set(lookup) - set(incoming):
+        raise ReportError("Há anúncios históricos ausentes na coleta; nenhuma linha será removida.")
+
+    last = max((index for index, row in enumerate(existing, 1)
+                if any(str(value).strip() for value in row)), default=1)
+    updates = []
+    expectations = []
+    for key, record in incoming.items():
+        values = list(record["values"])
+        found = lookup.get(key)
+        if found:
+            row_number = found["row_number"]
+            values[4] = found["values"][4]  # Keep the manually curated permalink.
+        else:
+            last += 1
+            row_number = last
+        ids = [[record["meta_ad_id"], record["meta_adset_id"], record["meta_campaign_id"]]]
+        updates.extend((
+            {"range": f"A{row_number}:N{row_number}", "values": [values]},
+            {"range": f"Q{row_number}:S{row_number}", "values": ids},
+        ))
+        expectations.append({"row_number": row_number, "values": values, "ids": ids[0]})
+    return updates, expectations
+
+
+def verify_month_write(before, after, expectations):
+    """Confirm written values and that manual O:P cells did not change."""
+    for expected in expectations:
+        row_number = expected["row_number"]
+        if row_number > len(after):
+            raise ReportError("A escrita não criou todas as linhas esperadas.")
+        actual = (after[row_number - 1] + [""] * 19)[:19]
+        values = expected["values"]
+        if sheet_month(actual[0]) != values[0] or [str(value) for value in actual[1:5]] != [str(value) for value in values[1:5]]:
+            raise ReportError("A escrita textual não foi confirmada na planilha.")
+        for column in range(5, 14):
+            _assert_close("pós-escrita", sheet_number(actual[column]), numeric(values[column]), Decimal("0.0001"))
+        if [str(value) for value in actual[16:19]] != expected["ids"]:
+            raise ReportError("Os identificadores Meta não foram confirmados após a escrita.")
+        if row_number <= len(before):
+            old = (before[row_number - 1] + [""] * 19)[:19]
+            if [str(value) for value in actual[14:16]] != [str(value) for value in old[14:16]]:
+                raise ReportError("As colunas manuais O:P mudaram; revisão necessária.")
 
 
 def open_sheet(credentials_json):
@@ -613,8 +750,11 @@ def main():
     parser.add_argument("--mapping", default=None)
     parser.add_argument("--check-sheet", action="store_true")
     parser.add_argument("--backfill-ids", action="store_true")
+    parser.add_argument("--write-sheet", action="store_true")
     args = parser.parse_args()
     try:
+        if sum((args.check_sheet, args.backfill_ids, args.write_sheet)) > 1:
+            raise ReportError("Escolha somente um modo de planilha.")
         client = MetaClient(os.environ.get("META_ACCESS_TOKEN"), os.environ.get("META_API_VERSION", "v26.0"))
         raw = collect(client, args.month)
         output = Path(args.output)
@@ -625,7 +765,19 @@ def main():
             mapping = json.loads(Path(args.mapping).read_text(encoding="utf-8"))
             prepared = report_rows(raw, mapping)
             (output / "meta_preview.json").write_text(json.dumps({"headers": HEADERS[:14], "rows": prepared}, ensure_ascii=False, indent=2), encoding="utf-8")
-        if args.backfill_ids:
+        if args.write_sheet:
+            credentials_json = os.environ.get("GCP_SERVICE_ACCOUNT_JSON")
+            existing = load_sheet_rows(credentials_json)
+            mapping = build_mapping(raw, existing)
+            records = report_rows(raw, mapping, include_ids=True)
+            updates, expectations = plan_month_updates(existing, records, raw["month"])
+            apply_sheet_updates(credentials_json, updates)
+            verified = load_sheet_rows(credentials_json)
+            verify_month_write(existing, verified, expectations)
+            print("Mês atualizado e verificado com preservação de O:P: " + json.dumps(
+                {"month": raw["month"], "rows": len(records)},
+                ensure_ascii=False, sort_keys=True))
+        elif args.backfill_ids:
             credentials_json = os.environ.get("GCP_SERVICE_ACCOUNT_JSON")
             existing = load_sheet_rows(credentials_json)
             reconciliation, updates = reconcile_sheet(
