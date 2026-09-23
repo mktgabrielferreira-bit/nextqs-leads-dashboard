@@ -15,6 +15,8 @@ import plotly.graph_objects as go
 import streamlit as st
 from google.oauth2.service_account import Credentials
 
+from integrations.dashboard_filters import filter_opportunities_by_origins
+
 st.set_page_config(
     page_title="Relatório de Leads",
     page_icon="📊",
@@ -3086,6 +3088,10 @@ def render_normal_mode(
     hoje,
     ontem,
 ):
+    df_periodo_opportunities = filter_opportunities_by_origins(
+        df_periodo_opportunities,
+        origens_sel,
+    )
     df_filtrado = apply_extra_filters_leads(df_periodo_leads, eventos_sel, origens_sel, dispositivos_sel)
     df_leads_meta_whatsapp_periodo = get_effective_period_filtered_df(dfs.get("leads_meta_whatsapp", pd.DataFrame()), periodo_sel, hoje, ontem)
     df_leads_meta_whatsapp_filtrado = apply_common_filters(df_leads_meta_whatsapp_periodo, origens_sel, dispositivos_sel)
@@ -3277,6 +3283,9 @@ def render_compare_mode(
     df_m2_leads_base = filter_by_year_month(df_leads, ano_sel, m2_num)
     df_m1_opp = filter_by_year_month(df_opportunities, ano_sel, m1_num)
     df_m2_opp = filter_by_year_month(df_opportunities, ano_sel, m2_num)
+
+    df_m1_opp = filter_opportunities_by_origins(df_m1_opp, origens_sel)
+    df_m2_opp = filter_opportunities_by_origins(df_m2_opp, origens_sel)
 
     df_m1 = apply_extra_filters_leads(df_m1_leads_base, eventos_sel, origens_sel, dispositivos_sel)
     df_m2 = apply_extra_filters_leads(df_m2_leads_base, eventos_sel, origens_sel, dispositivos_sel)
