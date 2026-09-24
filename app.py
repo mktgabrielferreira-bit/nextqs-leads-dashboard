@@ -15,7 +15,10 @@ import plotly.graph_objects as go
 import streamlit as st
 from google.oauth2.service_account import Credentials
 
-from integrations.dashboard_filters import filter_opportunities_by_origins
+from integrations.dashboard_filters import (
+    filter_opportunities_by_origins,
+    select_first_conversion_per_lead,
+)
 
 st.set_page_config(
     page_title="Relatório de Leads",
@@ -1871,8 +1874,9 @@ def build_origin_table(
 
     if leads_frames:
         df_leads_combined = prepare_leads_for_reporting(pd.concat(leads_frames, ignore_index=True))
+        df_first_conversions = select_first_conversion_per_lead(df_leads_combined)
         df_leads_counts = (
-            df_leads_combined.drop_duplicates(subset=["origem", "lead_key"])
+            df_first_conversions
             .groupby("origem")["lead_key"]
             .nunique()
             .reset_index(name="Leads")
