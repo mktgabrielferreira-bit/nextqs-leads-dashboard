@@ -2120,8 +2120,10 @@ def campaign_badge_html(campaign_name: str) -> str:
         ("[nextqsbr]-metaads", "br", "meta"),
         ("[nextqsbr]-instagrambio", "br", "meta"),
         ("[nextqspt]-metaads", "pt", "meta"),
+        ("[nextqses]-metaads", "es", "meta"),
         ("[nextqsbr]-googleads", "br", "google"),
         ("[nextqspt]-googleads", "pt", "google"),
+        ("[nextqses]-googleads", "es", "google"),
         ("[nextqsbr]-email", "br", "email"),
         ("[nextqspt]-email", "pt", "email"),
     ]
@@ -2144,6 +2146,7 @@ def render_campaign_table(df_campaigns: pd.DataFrame, height: int = 400):
     email_icon = image_as_data_uri(str(assets_dir / "email.png"))
     br_flag = image_as_data_uri(str(assets_dir / "flag-br.svg"))
     pt_flag = image_as_data_uri(str(assets_dir / "flag-pt.svg"))
+    es_flag = image_as_data_uri(str(assets_dir / "flag-es.svg"))
 
     header_html = "".join(
         f"<th class='{'campaign-name-col' if col == 'Campanha' else 'campaign-number-col'}'>{html.escape(str(col))}</th>"
@@ -2220,6 +2223,7 @@ def render_campaign_table(df_campaigns: pd.DataFrame, height: int = 400):
         }}
         .campaign-flag-br {{ background-image: url('{br_flag}'); }}
         .campaign-flag-pt {{ background-image: url('{pt_flag}'); }}
+        .campaign-flag-es {{ background-image: url('{es_flag}'); }}
         .campaign-platform {{
             display: inline-block;
             width: 1.05em;
