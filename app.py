@@ -209,6 +209,10 @@ def normalize_campaign(value) -> str:
     return text
 
 
+def is_test_campaign(value) -> bool:
+    return normalize_text(value).casefold() == "teste"
+
+
 def get_today_local() -> date:
     try:
         return datetime.now(ZoneInfo("America/Sao_Paulo")).date()
@@ -2091,6 +2095,7 @@ def build_campaign_table(
         | (df_campaign_out["Oportunidades"] > 0)
         | (df_campaign_out["Negócios"] > 0)
     ].copy()
+    df_campaign_out = df_campaign_out[~df_campaign_out["Campanha"].apply(is_test_campaign)].copy()
     if df_campaign_out.empty:
         return pd.DataFrame(columns=["Campanha", "Leads", "Oportunidades", "Negócios"])
     return (
